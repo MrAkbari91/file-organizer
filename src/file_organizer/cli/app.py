@@ -4,12 +4,14 @@ import argparse
 import sys
 from pathlib import Path
 from file_organizer import __version__
+from file_organizer.core.config import ConfigManager
 from file_organizer.core.duplicates import (
     DuplicateMethod,
     calculate_duplicate_space,
     find_duplicates,
     move_duplicates,
 )
+from file_organizer.core.logger import setup_logger
 from file_organizer.core.organizer import FileOrganizer, OrganizeMode
 from file_organizer.core.undo import UndoManager
 
@@ -53,6 +55,19 @@ def main() -> None:
         help="Organize files by modification date (e.g., 2026/October/)",
     )
 
+    # Config & Ignore options
+    parser.add_argument(
+        "--config",
+        dest="config_file",
+        help="Path to custom JSON configuration file",
+    )
+    parser.add_argument(
+        "--ignore",
+        action="append",
+        default=[],
+        help="Add pattern to ignore (can be used multiple times, e.g. --ignore '*.bak' --ignore 'draft_*')",
+    )
+
     # Duplicate options
     parser.add_argument(
         "--find-duplicates",
@@ -68,7 +83,7 @@ def main() -> None:
         "--dup-method",
         choices=["exact", "converted", "visual"],
         default="exact",
-        help="Duplicate detection method: 'exact' (SHA-256 binary), 'converted' (same name across jpg/png/webp), 'visual' (pixel similarity)",
+        help="Duplicate detection method: 'exact' (SHA-256), 'converted' (same name across formats), 'visual' (pixel hash)",
     )
 
     parser.add_argument(
@@ -113,48 +128,56 @@ def main() -> None:
         print(f"Error: Path is not a valid directory: {target_path}", file=sys.stderr)
         sys.exit(1)
 
+    # Setup Config & Logger
+    cfg_path = Path(args.config_file) if args.config_file else None
+    config = ConfigManager(config_path=cfg_path)
+    for pat in args.ignore:
+        if pat not in config.ignore_patterns:
+            config.ignore_patterns.append(pat)
+
+    logger = setup_logger(target_folder=target_path)
+
     # Handle Undo
     if args.undo:
         undo_mgr = UndoManager(target_path)
         reverted, error_count, errors = undo_mgr.undo_last()
         if error_count > 0 and reverted == 0:
-            print(f"Undo failed: {errors[0]}", file=sys.stderr)
+            logger.error(f"Undo failed: {errors[0]}")
             sys.exit(1)
-        print(f"\n↩️  Undo Complete! Reverted {reverted} file(s).")
+        logger.info(f"↩️  Undo Complete! Reverted {reverted} file(s).")
         if errors:
-            print("Encountered errors:")
             for err in errors:
-                print(f"  - {err}")
+                logger.warning(f"  - {err}")
         return
 
     # Handle Duplicate Detection
     if args.find_duplicates or args.move_duplicates:
         method = DuplicateMethod(args.dup_method)
-        print(f"\n🔍 Scanning duplicates in: {target_path} (Method: {method.value}, Recursive: {args.recursive})")
+        logger.info(f"Scanning duplicates in: {target_path} (Method: {method.value}, Recursive: {args.recursive})")
         dups = find_duplicates(target_path, method=method, recursive=args.recursive)
 
         if not dups:
-            print("🎉 No duplicate or converted format files found!")
+            logger.info("🎉 No duplicate or converted format files found!")
             return
 
         wasted = calculate_duplicate_space(dups)
         total_dup_files = sum(len(files) - 1 for files in dups.values())
-        print(f"\n⚠️  Found {len(dups)} duplicate group(s) ({total_dup_files} redundant files, ~{format_bytes(wasted)} can be saved):\n")
+        logger.info(f"⚠️  Found {len(dups)} duplicate group(s) ({total_dup_files} redundant files, ~{format_bytes(wasted)} can be saved):")
 
         for idx, (key, files) in enumerate(dups.items(), 1):
             label = key if len(key) < 30 else f"{key[:20]}..."
-            print(f"Group #{idx} [{label}]:")
-            print(f"  [Keep/Original] -> {files[0].name} ({format_bytes(files[0].stat().st_size)})")
+            logger.info(f"Group #{idx} [{label}]:")
+            logger.info(f"  [Keep/Original] -> {files[0].name} ({format_bytes(files[0].stat().st_size)})")
             for extra in files[1:]:
-                print(f"  [Duplicate/Copy] -> {extra.name} ({format_bytes(extra.stat().st_size)})")
+                logger.info(f"  [Duplicate/Copy] -> {extra.name} ({format_bytes(extra.stat().st_size)})")
 
         if args.move_duplicates:
             undo_mgr = UndoManager(target_path)
             moved_count, _ = move_duplicates(target_path, dups, undo_manager=undo_mgr, dry_run=args.dry_run)
             action = "[DRY-RUN] Would move" if args.dry_run else "Moved"
-            print(f"\n📦 {action} {moved_count} redundant file(s) into '_duplicates/' folder.")
+            logger.info(f"📦 {action} {moved_count} redundant file(s) into '_duplicates/' folder.")
             if not args.dry_run:
-                print("💡 You can revert this anytime using `--undo`.")
+                logger.info("💡 You can revert this anytime using `--undo`.")
         return
 
     # Normal Organize workflow
@@ -162,10 +185,12 @@ def main() -> None:
         mode = OrganizeMode.CATEGORY
     elif args.by_date:
         mode = OrganizeMode.DATE
-    else:
+    elif args.by_extension:
         mode = OrganizeMode.EXTENSION
+    else:
+        mode = OrganizeMode(config.default_mode)
 
-    sub_ext = not args.no_sub_extension
+    sub_ext = not args.no_sub_extension if args.no_sub_extension else config.sub_extension
 
     try:
         organizer = FileOrganizer(
@@ -175,10 +200,12 @@ def main() -> None:
             recursive=args.recursive,
             clean_empty=args.clean_empty,
             dry_run=args.dry_run,
+            config=config,
+            logger=logger,
         )
         organizer.organize()
     except Exception as exc:
-        print(f"Failed to organize files: {exc}", file=sys.stderr)
+        logger.error(f"Failed to organize files: {exc}")
         sys.exit(1)
 
 

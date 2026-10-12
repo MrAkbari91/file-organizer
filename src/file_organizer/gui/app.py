@@ -1,16 +1,18 @@
-"""GUI entry point module with functional folder picker, sorting modes, sub-extension nesting, duplicate detection with method selection, and undo support."""
+"""GUI entry point module with functional folder picker, sorting modes, custom ignore rules, duplicate detection, and undo support."""
 
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from pathlib import Path
 from file_organizer import __version__
+from file_organizer.core.config import ConfigManager
 from file_organizer.core.duplicates import (
     DuplicateMethod,
     calculate_duplicate_space,
     find_duplicates,
     move_duplicates,
 )
+from file_organizer.core.logger import setup_logger
 from file_organizer.core.organizer import FileOrganizer, OrganizeMode
 from file_organizer.core.undo import UndoManager
 
@@ -28,8 +30,8 @@ class OrganizerGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title(f"File Organizer Pro v{__version__}")
-        self.root.geometry("740x630")
-        self.root.minsize(620, 520)
+        self.root.geometry("760x650")
+        self.root.minsize(640, 530)
 
         self.selected_folder = tk.StringVar(value="")
         self.organize_mode = tk.StringVar(value=OrganizeMode.CATEGORY.value)
@@ -38,7 +40,9 @@ class OrganizerGUI:
         self.recursive_var = tk.BooleanVar(value=False)
         self.clean_empty_var = tk.BooleanVar(value=False)
         self.dry_run_var = tk.BooleanVar(value=False)
+        self.custom_ignore_var = tk.StringVar(value="")
 
+        self.config = ConfigManager()
         self._build_ui()
 
     def _build_ui(self):
@@ -90,7 +94,7 @@ class OrganizerGUI:
 
         ttk.Radiobutton(
             dup_frame,
-            text="Converted Formats (Same name across jpg/png/webp)",
+            text="Converted Formats (Same name across formats)",
             variable=self.dup_method_var,
             value=DuplicateMethod.CONVERTED.value,
         ).pack(side="left", padx=(0, 12))
@@ -102,8 +106,8 @@ class OrganizerGUI:
             value=DuplicateMethod.VISUAL.value,
         ).pack(side="left")
 
-        # Options frame
-        opts_frame = ttk.LabelFrame(self.root, text="Options", padding=8)
+        # Options & Custom Ignore frame
+        opts_frame = ttk.LabelFrame(self.root, text="Options & Ignore Rules", padding=8)
         opts_frame.pack(fill="x", padx=15, pady=4)
 
         ttk.Checkbutton(
@@ -113,7 +117,7 @@ class OrganizerGUI:
         ).pack(anchor="w", pady=(0, 4))
 
         row2 = ttk.Frame(opts_frame)
-        row2.pack(fill="x")
+        row2.pack(fill="x", pady=(0, 4))
 
         ttk.Checkbutton(
             row2,
@@ -132,6 +136,14 @@ class OrganizerGUI:
             text="Dry Run (preview only)",
             variable=self.dry_run_var,
         ).pack(side="left")
+
+        # Ignore input row
+        ignore_row = ttk.Frame(opts_frame)
+        ignore_row.pack(fill="x", pady=(2, 0))
+        ttk.Label(ignore_row, text="Ignore pattern(s):").pack(side="left", padx=(0, 6))
+        ignore_entry = ttk.Entry(ignore_row, textvariable=self.custom_ignore_var)
+        ignore_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        ttk.Label(ignore_row, text="(comma separated, e.g. *.tmp, draft_*, private)").pack(side="left")
 
         # Action Buttons frame
         btn_frame = ttk.Frame(self.root, padding=(15, 6))
@@ -158,7 +170,7 @@ class OrganizerGUI:
         self.undo_btn.pack(side="left")
 
         # Log & status area
-        log_frame = ttk.LabelFrame(self.root, text="Activity Log", padding=8)
+        log_frame = ttk.LabelFrame(self.root, text="Activity Log (also saved to file_organizer.log)", padding=8)
         log_frame.pack(fill="both", expand=True, padx=15, pady=(0, 10))
 
         self.log_text = tk.Text(log_frame, wrap="word", state="disabled", font=("Consolas", 9))
@@ -186,6 +198,17 @@ class OrganizerGUI:
         self.move_dup_btn.configure(state=state)
         self.undo_btn.configure(state=state)
 
+    def _get_active_config(self) -> ConfigManager:
+        cfg = ConfigManager()
+        # Parse extra custom ignore patterns from GUI
+        raw_ignores = self.custom_ignore_var.get().strip()
+        if raw_ignores:
+            for item in raw_ignores.split(","):
+                pattern = item.strip()
+                if pattern and pattern not in cfg.ignore_patterns:
+                    cfg.ignore_patterns.append(pattern)
+        return cfg
+
     def _start_organize(self):
         folder_path = self.selected_folder.get().strip()
         if not folder_path:
@@ -199,9 +222,11 @@ class OrganizerGUI:
 
         self._set_buttons_state("disabled")
         selected_mode = OrganizeMode(self.organize_mode.get())
-        self._log(
-            f"\n--- Starting organization on: {target} (Mode: {selected_mode.value}, "
-            f"Sub-extensions: {self.sub_ext_var.get()}, Recursive: {self.recursive_var.get()}) ---"
+        cfg = self._get_active_config()
+
+        logger = setup_logger(
+            target_folder=target,
+            gui_callback=lambda msg: self.root.after(0, lambda m=msg: self._log(m)),
         )
 
         def run():
@@ -213,16 +238,17 @@ class OrganizerGUI:
                     recursive=self.recursive_var.get(),
                     clean_empty=self.clean_empty_var.get(),
                     dry_run=self.dry_run_var.get(),
+                    config=cfg,
+                    logger=logger,
                 )
                 stats = organizer.organize()
                 summary = (
                     f"Completed! Moved: {stats['moved']} | Skipped: {stats['skipped']} | "
                     f"Errors: {stats['errors']} | Cleaned Folders: {stats.get('cleaned_dirs', 0)}"
                 )
-                self.root.after(0, lambda: self._log(summary))
                 self.root.after(0, lambda: messagebox.showinfo("Finished", summary))
             except Exception as e:
-                self.root.after(0, lambda: self._log(f"Error: {e}"))
+                logger.error(f"Error during organize: {e}")
                 self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
             finally:
                 self.root.after(0, lambda: self._set_buttons_state("normal"))
