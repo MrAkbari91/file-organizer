@@ -1,0 +1,114 @@
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Standalone Binaries
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows
+            cli_ext: .exe
+            gui_ext: .exe
+            asset_cli: file-organizer-cli-windows-x64.exe
+            asset_gui: file-organizer-gui-windows-x64.exe
+          - os: macos-latest
+            platform: macos
+            cli_ext: ""
+            gui_ext: ""
+            asset_cli: file-organizer-cli-macos-x64
+            asset_gui: file-organizer-gui-macos-x64
+          - os: ubuntu-latest
+            platform: linux
+            cli_ext: ""
+            gui_ext: ""
+            asset_cli: file-organizer-cli-linux-x64
+            asset_gui: file-organizer-gui-linux-x64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+          pip install -e .
+
+      - name: Build CLI Binary
+        run: |
+          pyinstaller --noconfirm --clean --onefile --name "file-organizer-cli${{ matrix.cli_ext }}" src/file_organizer/cli/app.py
+
+      - name: Build GUI Binary
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed --name "file-organizer-gui${{ matrix.gui_ext }}" src/file_organizer/gui/app.py
+
+      - name: Rename Binaries for Release Artifacts (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Move-Item "dist/file-organizer-cli.exe" "dist/${{ matrix.asset_cli }}"
+          Move-Item "dist/file-organizer-gui.exe" "dist/${{ matrix.asset_gui }}"
+
+      - name: Rename Binaries for Release Artifacts (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mv dist/file-organizer-cli dist/${{ matrix.asset_cli }}
+          mv dist/file-organizer-gui dist/${{ matrix.asset_gui }}
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.platform }}
+          path: |
+            dist/${{ matrix.asset_cli }}
+            dist/${{ matrix.asset_gui }}
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download Windows Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: binaries-windows
+          path: release-assets/
+
+      - name: Download macOS Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: binaries-macos
+          path: release-assets/
+
+      - name: Download Linux Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: binaries-linux
+          path: release-assets/
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true
+          draft: false
+          prerelease: false
