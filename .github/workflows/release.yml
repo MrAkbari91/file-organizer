@@ -52,11 +52,11 @@ jobs:
 
       - name: Build CLI Binary
         run: |
-          pyinstaller --noconfirm --clean --onefile --name "file-organizer-cli${{ matrix.cli_ext }}" src/file_organizer/cli/app.py
+          pyinstaller --noconfirm --clean --onefile --paths src --name "file-organizer-cli${{ matrix.cli_ext }}" src/file_organizer/cli/app.py
 
       - name: Build GUI Binary
         run: |
-          pyinstaller --noconfirm --clean --onefile --windowed --name "file-organizer-gui${{ matrix.gui_ext }}" src/file_organizer/gui/app.py
+          pyinstaller --noconfirm --clean --onefile --windowed --paths src --name "file-organizer-gui${{ matrix.gui_ext }}" src/file_organizer/gui/app.py
 
       - name: Rename Binaries for Release Artifacts (Windows)
         if: runner.os == 'Windows'
