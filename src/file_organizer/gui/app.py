@@ -1,10 +1,11 @@
-"""GUI entry point module with functional folder picker, sorting modes, custom ignore rules, duplicate detection, and undo support."""
+"""GUI entry point module with functional folder picker, sorting modes, custom ignore rules, duplicate detection, live auto-watcher, startup permission toggle, and undo support."""
 
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from pathlib import Path
 from file_organizer import __version__
+from file_organizer.core.autostart import disable_autostart, enable_autostart, is_autostart_enabled
 from file_organizer.core.config import ConfigManager
 from file_organizer.core.duplicates import (
     DuplicateMethod,
@@ -15,6 +16,7 @@ from file_organizer.core.duplicates import (
 from file_organizer.core.logger import setup_logger
 from file_organizer.core.organizer import FileOrganizer, OrganizeMode
 from file_organizer.core.undo import UndoManager
+from file_organizer.core.watcher import FolderWatcher
 
 
 def format_bytes(num_bytes: int) -> str:
@@ -30,8 +32,8 @@ class OrganizerGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title(f"File Organizer Pro v{__version__}")
-        self.root.geometry("760x650")
-        self.root.minsize(640, 530)
+        self.root.geometry("780x690")
+        self.root.minsize(660, 560)
 
         self.selected_folder = tk.StringVar(value="")
         self.organize_mode = tk.StringVar(value=OrganizeMode.CATEGORY.value)
@@ -40,8 +42,10 @@ class OrganizerGUI:
         self.recursive_var = tk.BooleanVar(value=False)
         self.clean_empty_var = tk.BooleanVar(value=False)
         self.dry_run_var = tk.BooleanVar(value=False)
+        self.autostart_var = tk.BooleanVar(value=is_autostart_enabled())
         self.custom_ignore_var = tk.StringVar(value="")
 
+        self.active_watcher: FolderWatcher = None
         self.config = ConfigManager()
         self._build_ui()
 
@@ -107,7 +111,7 @@ class OrganizerGUI:
         ).pack(side="left")
 
         # Options & Custom Ignore frame
-        opts_frame = ttk.LabelFrame(self.root, text="Options & Ignore Rules", padding=8)
+        opts_frame = ttk.LabelFrame(self.root, text="Options & Background Automation", padding=8)
         opts_frame.pack(fill="x", padx=15, pady=4)
 
         ttk.Checkbutton(
@@ -137,32 +141,48 @@ class OrganizerGUI:
             variable=self.dry_run_var,
         ).pack(side="left")
 
+        # System Boot / Autostart option with explicit user confirmation
+        boot_row = ttk.Frame(opts_frame)
+        boot_row.pack(fill="x", pady=(2, 4))
+        self.boot_cb = ttk.Checkbutton(
+            boot_row,
+            text="Start silent auto-watch automatically on Windows Boot (Set & Forget)",
+            variable=self.autostart_var,
+            command=self._on_toggle_autostart,
+        )
+        self.boot_cb.pack(side="left")
+
         # Ignore input row
         ignore_row = ttk.Frame(opts_frame)
         ignore_row.pack(fill="x", pady=(2, 0))
         ttk.Label(ignore_row, text="Ignore pattern(s):").pack(side="left", padx=(0, 6))
         ignore_entry = ttk.Entry(ignore_row, textvariable=self.custom_ignore_var)
         ignore_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
-        ttk.Label(ignore_row, text="(comma separated, e.g. *.tmp, draft_*, private)").pack(side="left")
+        ttk.Label(ignore_row, text="(comma separated, e.g. *.tmp, draft_*)").pack(side="left")
 
         # Action Buttons frame
         btn_frame = ttk.Frame(self.root, padding=(15, 6))
         btn_frame.pack(fill="x")
 
         self.organize_btn = ttk.Button(
-            btn_frame, text="⚡ Organize Files", command=self._start_organize
+            btn_frame, text="⚡ Organize Now", command=self._start_organize
         )
-        self.organize_btn.pack(side="left", padx=(0, 8))
+        self.organize_btn.pack(side="left", padx=(0, 6))
+
+        self.watch_btn = ttk.Button(
+            btn_frame, text="👀 Start Auto-Watch", command=self._toggle_watch
+        )
+        self.watch_btn.pack(side="left", padx=(0, 6))
 
         self.find_dup_btn = ttk.Button(
             btn_frame, text="🔍 Find Duplicates", command=self._start_find_duplicates
         )
-        self.find_dup_btn.pack(side="left", padx=(0, 8))
+        self.find_dup_btn.pack(side="left", padx=(0, 6))
 
         self.move_dup_btn = ttk.Button(
             btn_frame, text="📦 Move Duplicates", command=self._start_move_duplicates
         )
-        self.move_dup_btn.pack(side="left", padx=(0, 8))
+        self.move_dup_btn.pack(side="left", padx=(0, 6))
 
         self.undo_btn = ttk.Button(
             btn_frame, text="↩ Undo Last", command=self._start_undo
@@ -192,15 +212,38 @@ class OrganizerGUI:
             self.selected_folder.set(folder)
             self._log(f"Selected: {folder}")
 
-    def _set_buttons_state(self, state: str):
-        self.organize_btn.configure(state=state)
-        self.find_dup_btn.configure(state=state)
-        self.move_dup_btn.configure(state=state)
-        self.undo_btn.configure(state=state)
+    def _on_toggle_autostart(self):
+        """Handle user opting in or out of Windows Startup auto-run."""
+        if self.autostart_var.get():
+            folder_path = self.selected_folder.get().strip()
+            if not folder_path or not Path(folder_path).is_dir():
+                messagebox.showwarning("Folder Required", "Please select a valid folder before enabling startup auto-watch!")
+                self.autostart_var.set(False)
+                return
+
+            confirm = messagebox.askyesno(
+                "Confirm System Startup Permission",
+                f"Are you sure you want File Organizer to automatically run in the background "
+                f"every time your computer starts up for:\n\n{folder_path}?\n\n"
+                f"You can turn this off at any time by unchecking this box.",
+            )
+            if confirm:
+                mode = self.organize_mode.get()
+                if enable_autostart(Path(folder_path), mode=mode):
+                    self._log("✅ Startup background auto-watch enabled with your permission.")
+                    messagebox.showinfo("Enabled", "Background auto-watch will now run silently on PC boot.")
+                else:
+                    self.autostart_var.set(False)
+                    messagebox.showerror("Error", "Could not register startup task on this system.")
+            else:
+                self.autostart_var.set(False)
+        else:
+            if disable_autostart():
+                self._log("Removed from system startup.")
+                messagebox.showinfo("Disabled", "Auto-watch has been removed from system startup.")
 
     def _get_active_config(self) -> ConfigManager:
         cfg = ConfigManager()
-        # Parse extra custom ignore patterns from GUI
         raw_ignores = self.custom_ignore_var.get().strip()
         if raw_ignores:
             for item in raw_ignores.split(","):
@@ -209,38 +252,35 @@ class OrganizerGUI:
                     cfg.ignore_patterns.append(pattern)
         return cfg
 
-    def _start_organize(self):
-        folder_path = self.selected_folder.get().strip()
-        if not folder_path:
-            messagebox.showwarning("No Folder Selected", "Please select a folder to organize first!")
-            return
-
-        target = Path(folder_path)
-        if not target.is_dir():
-            messagebox.showerror("Invalid Directory", "The specified path is not a valid folder.")
-            return
-
-        self._set_buttons_state("disabled")
+    def _create_organizer(self, target: Path) -> FileOrganizer:
         selected_mode = OrganizeMode(self.organize_mode.get())
         cfg = self._get_active_config()
-
         logger = setup_logger(
             target_folder=target,
             gui_callback=lambda msg: self.root.after(0, lambda m=msg: self._log(m)),
         )
+        return FileOrganizer(
+            target,
+            mode=selected_mode,
+            sub_extension=self.sub_ext_var.get(),
+            recursive=self.recursive_var.get(),
+            clean_empty=self.clean_empty_var.get(),
+            dry_run=self.dry_run_var.get(),
+            config=cfg,
+            logger=logger,
+        )
+
+    def _start_organize(self):
+        folder_path = self.selected_folder.get().strip()
+        if not folder_path or not Path(folder_path).is_dir():
+            messagebox.showwarning("No Folder Selected", "Please select a valid folder first!")
+            return
+
+        target = Path(folder_path)
+        organizer = self._create_organizer(target)
 
         def run():
             try:
-                organizer = FileOrganizer(
-                    target,
-                    mode=selected_mode,
-                    sub_extension=self.sub_ext_var.get(),
-                    recursive=self.recursive_var.get(),
-                    clean_empty=self.clean_empty_var.get(),
-                    dry_run=self.dry_run_var.get(),
-                    config=cfg,
-                    logger=logger,
-                )
                 stats = organizer.organize()
                 summary = (
                     f"Completed! Moved: {stats['moved']} | Skipped: {stats['skipped']} | "
@@ -248,26 +288,40 @@ class OrganizerGUI:
                 )
                 self.root.after(0, lambda: messagebox.showinfo("Finished", summary))
             except Exception as e:
-                logger.error(f"Error during organize: {e}")
                 self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
-            finally:
-                self.root.after(0, lambda: self._set_buttons_state("normal"))
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _start_find_duplicates(self):
+    def _toggle_watch(self):
+        """Toggle live background folder watcher."""
+        if self.active_watcher and self.active_watcher.is_running():
+            self.active_watcher.stop()
+            self.active_watcher = None
+            self.watch_btn.configure(text="👀 Start Auto-Watch")
+            self._log("⏹ Live Auto-Watch stopped.")
+            return
+
         folder_path = self.selected_folder.get().strip()
-        if not folder_path:
-            messagebox.showwarning("No Folder Selected", "Please select a folder first!")
+        if not folder_path or not Path(folder_path).is_dir():
+            messagebox.showwarning("No Folder Selected", "Please select a valid folder first!")
             return
 
         target = Path(folder_path)
-        if not target.is_dir():
-            messagebox.showerror("Invalid Directory", "The specified path is not a valid folder.")
+        organizer = self._create_organizer(target)
+        self.active_watcher = FolderWatcher(organizer, interval=3.0)
+        self.active_watcher.start()
+
+        self.watch_btn.configure(text="⏹ Stop Auto-Watch")
+        self._log(f"👀 Live Auto-Watch ACTIVE on {target}. Watching for newly downloaded/added files...")
+
+    def _start_find_duplicates(self):
+        folder_path = self.selected_folder.get().strip()
+        if not folder_path or not Path(folder_path).is_dir():
+            messagebox.showwarning("No Folder Selected", "Please select a valid folder first!")
             return
 
+        target = Path(folder_path)
         method = DuplicateMethod(self.dup_method_var.get())
-        self._set_buttons_state("disabled")
         self._log(f"\n--- Scanning duplicates in: {target} (Method: {method.value}) ---")
 
         def run():
@@ -292,22 +346,16 @@ class OrganizerGUI:
             except Exception as e:
                 self.root.after(0, lambda: self._log(f"Error finding duplicates: {e}"))
                 self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
-            finally:
-                self.root.after(0, lambda: self._set_buttons_state("normal"))
 
         threading.Thread(target=run, daemon=True).start()
 
     def _start_move_duplicates(self):
         folder_path = self.selected_folder.get().strip()
-        if not folder_path:
-            messagebox.showwarning("No Folder Selected", "Please select a folder first!")
+        if not folder_path or not Path(folder_path).is_dir():
+            messagebox.showwarning("No Folder Selected", "Please select a valid folder first!")
             return
 
         target = Path(folder_path)
-        if not target.is_dir():
-            messagebox.showerror("Invalid Directory", "The specified path is not a valid folder.")
-            return
-
         method = DuplicateMethod(self.dup_method_var.get())
         confirm = messagebox.askyesno(
             "Confirm Move Duplicates",
@@ -316,7 +364,6 @@ class OrganizerGUI:
         if not confirm:
             return
 
-        self._set_buttons_state("disabled")
         self._log(f"\n--- Moving duplicate files to _duplicates/ (Method: {method.value}) ---")
 
         def run():
@@ -334,22 +381,16 @@ class OrganizerGUI:
             except Exception as e:
                 self.root.after(0, lambda: self._log(f"Error moving duplicates: {e}"))
                 self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
-            finally:
-                self.root.after(0, lambda: self._set_buttons_state("normal"))
 
         threading.Thread(target=run, daemon=True).start()
 
     def _start_undo(self):
         folder_path = self.selected_folder.get().strip()
-        if not folder_path:
-            messagebox.showwarning("No Folder Selected", "Please select a target folder first!")
+        if not folder_path or not Path(folder_path).is_dir():
+            messagebox.showwarning("No Folder Selected", "Please select a valid folder first!")
             return
 
         target = Path(folder_path)
-        if not target.is_dir():
-            messagebox.showerror("Invalid Directory", "The specified path is not a valid folder.")
-            return
-
         confirm = messagebox.askyesno(
             "Confirm Undo",
             f"Are you sure you want to revert the last operation in:\n{target}?",
@@ -357,7 +398,6 @@ class OrganizerGUI:
         if not confirm:
             return
 
-        self._set_buttons_state("disabled")
         self._log(f"\n--- Reverting last operation on: {target} ---")
 
         def run():
@@ -374,9 +414,7 @@ class OrganizerGUI:
                     self.root.after(0, lambda: messagebox.showinfo("Undo Successful", msg))
             except Exception as e:
                 self.root.after(0, lambda: self._log(f"Error during undo: {e}"))
-                self.root.after(0, lambda: messagebox.showerror("Undo Error", str(e)))
-            finally:
-                self.root.after(0, lambda: self._set_buttons_state("normal"))
+                self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
 
         threading.Thread(target=run, daemon=True).start()
 

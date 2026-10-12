@@ -2,8 +2,10 @@
 
 import argparse
 import sys
+import time
 from pathlib import Path
 from file_organizer import __version__
+from file_organizer.core.autostart import disable_autostart, enable_autostart, is_autostart_enabled
 from file_organizer.core.config import ConfigManager
 from file_organizer.core.duplicates import (
     DuplicateMethod,
@@ -14,6 +16,7 @@ from file_organizer.core.duplicates import (
 from file_organizer.core.logger import setup_logger
 from file_organizer.core.organizer import FileOrganizer, OrganizeMode
 from file_organizer.core.undo import UndoManager
+from file_organizer.core.watcher import FolderWatcher
 
 
 def format_bytes(num_bytes: int) -> str:
@@ -55,6 +58,32 @@ def main() -> None:
         help="Organize files by modification date (e.g., 2026/October/)",
     )
 
+    # Watch Mode options
+    parser.add_argument(
+        "-w",
+        "--watch",
+        action="store_true",
+        help="Continuous auto-organize mode (Ctrl+C to stop)",
+    )
+    parser.add_argument(
+        "--watch-interval",
+        type=float,
+        default=3.0,
+        help="Polling interval in seconds for watch mode (default: 3.0)",
+    )
+
+    # System Startup options
+    parser.add_argument(
+        "--enable-startup",
+        action="store_true",
+        help="Enable silent background auto-watch on system boot (requires confirmation)",
+    )
+    parser.add_argument(
+        "--disable-startup",
+        action="store_true",
+        help="Disable and remove background auto-watch from system boot",
+    )
+
     # Config & Ignore options
     parser.add_argument(
         "--config",
@@ -65,7 +94,7 @@ def main() -> None:
         "--ignore",
         action="append",
         default=[],
-        help="Add pattern to ignore (can be used multiple times, e.g. --ignore '*.bak' --ignore 'draft_*')",
+        help="Add pattern to ignore (can be used multiple times, e.g. --ignore '*.bak')",
     )
 
     # Duplicate options
@@ -128,7 +157,7 @@ def main() -> None:
         print(f"Error: Path is not a valid directory: {target_path}", file=sys.stderr)
         sys.exit(1)
 
-    # Setup Config & Logger
+    # Setup Logger & Config
     cfg_path = Path(args.config_file) if args.config_file else None
     config = ConfigManager(config_path=cfg_path)
     for pat in args.ignore:
@@ -136,6 +165,26 @@ def main() -> None:
             config.ignore_patterns.append(pat)
 
     logger = setup_logger(target_folder=target_path)
+
+    # Handle Startup Commands
+    if args.enable_startup:
+        mode_str = "category" if args.by_category else ("date" if args.by_date else "extension")
+        confirm = input(f"Enable silent background auto-organize for '{target_path}' on system boot? (y/N): ").strip().lower()
+        if confirm == "y":
+            if enable_autostart(target_path, mode=mode_str):
+                logger.info("✅ Startup auto-watch enabled successfully!")
+            else:
+                logger.error("❌ Failed to enable startup auto-watch.")
+        else:
+            print("Cancelled by user.")
+        return
+
+    if args.disable_startup:
+        if disable_autostart():
+            logger.info("✅ Startup auto-watch disabled and removed.")
+        else:
+            logger.error("❌ Failed to disable startup auto-watch.")
+        return
 
     # Handle Undo
     if args.undo:
@@ -180,7 +229,7 @@ def main() -> None:
                 logger.info("💡 You can revert this anytime using `--undo`.")
         return
 
-    # Normal Organize workflow
+    # Normal Organize / Watch workflow
     if args.by_category:
         mode = OrganizeMode.CATEGORY
     elif args.by_date:
@@ -192,21 +241,34 @@ def main() -> None:
 
     sub_ext = not args.no_sub_extension if args.no_sub_extension else config.sub_extension
 
-    try:
-        organizer = FileOrganizer(
-            target_folder=target_path,
-            mode=mode,
-            sub_extension=sub_ext,
-            recursive=args.recursive,
-            clean_empty=args.clean_empty,
-            dry_run=args.dry_run,
-            config=config,
-            logger=logger,
-        )
-        organizer.organize()
-    except Exception as exc:
-        logger.error(f"Failed to organize files: {exc}")
-        sys.exit(1)
+    organizer = FileOrganizer(
+        target_folder=target_path,
+        mode=mode,
+        sub_extension=sub_ext,
+        recursive=args.recursive,
+        clean_empty=args.clean_empty,
+        dry_run=args.dry_run,
+        config=config,
+        logger=logger,
+    )
+
+    if args.watch:
+        logger.info(f"👀 Starting Watch Mode on: {target_path} (Interval: {args.watch_interval}s, Press Ctrl+C to exit)...")
+        watcher = FolderWatcher(organizer, interval=args.watch_interval)
+        watcher.start()
+        try:
+            while True:
+                time.sleep(1.0)
+        except KeyboardInterrupt:
+            logger.info("\nStopping watcher...")
+            watcher.stop()
+            logger.info("Watcher stopped cleanly.")
+    else:
+        try:
+            organizer.organize()
+        except Exception as exc:
+            logger.error(f"Failed to organize files: {exc}")
+            sys.exit(1)
 
 
 if __name__ == "__main__":
