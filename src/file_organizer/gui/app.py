@@ -1,23 +1,39 @@
-"""GUI entry point module with functional folder picker, sorting modes, sub-extension nesting, recursive option, and undo support."""
+"""GUI entry point module with functional folder picker, sorting modes, sub-extension nesting, duplicate detection with method selection, and undo support."""
 
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from pathlib import Path
 from file_organizer import __version__
+from file_organizer.core.duplicates import (
+    DuplicateMethod,
+    calculate_duplicate_space,
+    find_duplicates,
+    move_duplicates,
+)
 from file_organizer.core.organizer import FileOrganizer, OrganizeMode
 from file_organizer.core.undo import UndoManager
+
+
+def format_bytes(num_bytes: int) -> str:
+    """Format bytes into readable string."""
+    for unit in ["B", "KB", "MB", "GB"]:
+        if num_bytes < 1024.0:
+            return f"{num_bytes:.2f} {unit}"
+        num_bytes /= 1024.0
+    return f"{num_bytes:.2f} TB"
 
 
 class OrganizerGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title(f"File Organizer Pro v{__version__}")
-        self.root.geometry("690x550")
-        self.root.minsize(590, 460)
+        self.root.geometry("740x630")
+        self.root.minsize(620, 520)
 
         self.selected_folder = tk.StringVar(value="")
         self.organize_mode = tk.StringVar(value=OrganizeMode.CATEGORY.value)
+        self.dup_method_var = tk.StringVar(value=DuplicateMethod.EXACT.value)
         self.sub_ext_var = tk.BooleanVar(value=True)
         self.recursive_var = tk.BooleanVar(value=False)
         self.clean_empty_var = tk.BooleanVar(value=False)
@@ -28,7 +44,7 @@ class OrganizerGUI:
     def _build_ui(self):
         # Folder selection frame
         folder_frame = ttk.LabelFrame(self.root, text="Select Target Folder", padding=10)
-        folder_frame.pack(fill="x", padx=15, pady=8)
+        folder_frame.pack(fill="x", padx=15, pady=6)
 
         entry = ttk.Entry(folder_frame, textvariable=self.selected_folder)
         entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
@@ -38,7 +54,7 @@ class OrganizerGUI:
 
         # Sorting Mode frame
         mode_frame = ttk.LabelFrame(self.root, text="Sorting Mode", padding=8)
-        mode_frame.pack(fill="x", padx=15, pady=5)
+        mode_frame.pack(fill="x", padx=15, pady=4)
 
         ttk.Radiobutton(
             mode_frame,
@@ -61,9 +77,34 @@ class OrganizerGUI:
             value=OrganizeMode.DATE.value,
         ).pack(side="left")
 
+        # Duplicate Method Selection frame
+        dup_frame = ttk.LabelFrame(self.root, text="Duplicate Detection Method", padding=8)
+        dup_frame.pack(fill="x", padx=15, pady=4)
+
+        ttk.Radiobutton(
+            dup_frame,
+            text="Exact Binary (SHA-256)",
+            variable=self.dup_method_var,
+            value=DuplicateMethod.EXACT.value,
+        ).pack(side="left", padx=(0, 12))
+
+        ttk.Radiobutton(
+            dup_frame,
+            text="Converted Formats (Same name across jpg/png/webp)",
+            variable=self.dup_method_var,
+            value=DuplicateMethod.CONVERTED.value,
+        ).pack(side="left", padx=(0, 12))
+
+        ttk.Radiobutton(
+            dup_frame,
+            text="Visual Similarity (Pixel hash)",
+            variable=self.dup_method_var,
+            value=DuplicateMethod.VISUAL.value,
+        ).pack(side="left")
+
         # Options frame
         opts_frame = ttk.LabelFrame(self.root, text="Options", padding=8)
-        opts_frame.pack(fill="x", padx=15, pady=5)
+        opts_frame.pack(fill="x", padx=15, pady=4)
 
         ttk.Checkbutton(
             opts_frame,
@@ -97,18 +138,28 @@ class OrganizerGUI:
         btn_frame.pack(fill="x")
 
         self.organize_btn = ttk.Button(
-            btn_frame, text="⚡ Organize Files Now", command=self._start_organize
+            btn_frame, text="⚡ Organize Files", command=self._start_organize
         )
-        self.organize_btn.pack(side="left", padx=(0, 10))
+        self.organize_btn.pack(side="left", padx=(0, 8))
+
+        self.find_dup_btn = ttk.Button(
+            btn_frame, text="🔍 Find Duplicates", command=self._start_find_duplicates
+        )
+        self.find_dup_btn.pack(side="left", padx=(0, 8))
+
+        self.move_dup_btn = ttk.Button(
+            btn_frame, text="📦 Move Duplicates", command=self._start_move_duplicates
+        )
+        self.move_dup_btn.pack(side="left", padx=(0, 8))
 
         self.undo_btn = ttk.Button(
-            btn_frame, text="↩ Undo Last Operation", command=self._start_undo
+            btn_frame, text="↩ Undo Last", command=self._start_undo
         )
         self.undo_btn.pack(side="left")
 
         # Log & status area
         log_frame = ttk.LabelFrame(self.root, text="Activity Log", padding=8)
-        log_frame.pack(fill="both", expand=True, padx=15, pady=(0, 12))
+        log_frame.pack(fill="both", expand=True, padx=15, pady=(0, 10))
 
         self.log_text = tk.Text(log_frame, wrap="word", state="disabled", font=("Consolas", 9))
         scrollbar = ttk.Scrollbar(log_frame, command=self.log_text.yview)
@@ -129,6 +180,12 @@ class OrganizerGUI:
             self.selected_folder.set(folder)
             self._log(f"Selected: {folder}")
 
+    def _set_buttons_state(self, state: str):
+        self.organize_btn.configure(state=state)
+        self.find_dup_btn.configure(state=state)
+        self.move_dup_btn.configure(state=state)
+        self.undo_btn.configure(state=state)
+
     def _start_organize(self):
         folder_path = self.selected_folder.get().strip()
         if not folder_path:
@@ -140,8 +197,7 @@ class OrganizerGUI:
             messagebox.showerror("Invalid Directory", "The specified path is not a valid folder.")
             return
 
-        self.organize_btn.configure(state="disabled")
-        self.undo_btn.configure(state="disabled")
+        self._set_buttons_state("disabled")
         selected_mode = OrganizeMode(self.organize_mode.get())
         self._log(
             f"\n--- Starting organization on: {target} (Mode: {selected_mode.value}, "
@@ -169,8 +225,91 @@ class OrganizerGUI:
                 self.root.after(0, lambda: self._log(f"Error: {e}"))
                 self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
             finally:
-                self.root.after(0, lambda: self.organize_btn.configure(state="normal"))
-                self.root.after(0, lambda: self.undo_btn.configure(state="normal"))
+                self.root.after(0, lambda: self._set_buttons_state("normal"))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _start_find_duplicates(self):
+        folder_path = self.selected_folder.get().strip()
+        if not folder_path:
+            messagebox.showwarning("No Folder Selected", "Please select a folder first!")
+            return
+
+        target = Path(folder_path)
+        if not target.is_dir():
+            messagebox.showerror("Invalid Directory", "The specified path is not a valid folder.")
+            return
+
+        method = DuplicateMethod(self.dup_method_var.get())
+        self._set_buttons_state("disabled")
+        self._log(f"\n--- Scanning duplicates in: {target} (Method: {method.value}) ---")
+
+        def run():
+            try:
+                dups = find_duplicates(target, method=method, recursive=self.recursive_var.get())
+                if not dups:
+                    self.root.after(0, lambda: self._log(f"🎉 No duplicates found using {method.value} check!"))
+                    self.root.after(0, lambda: messagebox.showinfo("No Duplicates", f"No duplicates were found using {method.value} check."))
+                else:
+                    wasted = calculate_duplicate_space(dups)
+                    total_dup_files = sum(len(files) - 1 for files in dups.values())
+                    summary = f"Found {len(dups)} group(s) with {total_dup_files} extra files (~{format_bytes(wasted)} can be saved)."
+                    self.root.after(0, lambda: self._log(f"\n⚠️  {summary}"))
+
+                    for idx, (key, files) in enumerate(dups.items(), 1):
+                        label = key if len(key) < 30 else f"{key[:20]}..."
+                        self.root.after(0, lambda i=idx, l=label, f0=files[0]: self._log(f"\nGroup #{i} [{l}]:\n  [Keep/Original] -> {f0.name} ({format_bytes(f0.stat().st_size)})"))
+                        for extra in files[1:]:
+                            self.root.after(0, lambda ex=extra: self._log(f"  [Duplicate/Copy] -> {ex.name} ({format_bytes(ex.stat().st_size)})"))
+
+                    self.root.after(0, lambda: messagebox.showwarning("Duplicates Detected", summary))
+            except Exception as e:
+                self.root.after(0, lambda: self._log(f"Error finding duplicates: {e}"))
+                self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
+            finally:
+                self.root.after(0, lambda: self._set_buttons_state("normal"))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _start_move_duplicates(self):
+        folder_path = self.selected_folder.get().strip()
+        if not folder_path:
+            messagebox.showwarning("No Folder Selected", "Please select a folder first!")
+            return
+
+        target = Path(folder_path)
+        if not target.is_dir():
+            messagebox.showerror("Invalid Directory", "The specified path is not a valid folder.")
+            return
+
+        method = DuplicateMethod(self.dup_method_var.get())
+        confirm = messagebox.askyesno(
+            "Confirm Move Duplicates",
+            f"Are you sure you want to isolate extra duplicate files ({method.value} method) into '_duplicates/' in:\n{target}?",
+        )
+        if not confirm:
+            return
+
+        self._set_buttons_state("disabled")
+        self._log(f"\n--- Moving duplicate files to _duplicates/ (Method: {method.value}) ---")
+
+        def run():
+            try:
+                dups = find_duplicates(target, method=method, recursive=self.recursive_var.get())
+                if not dups:
+                    self.root.after(0, lambda: self._log("No duplicates to move."))
+                    self.root.after(0, lambda: messagebox.showinfo("No Duplicates", "No duplicates were found to move."))
+                else:
+                    undo_mgr = UndoManager(target)
+                    moved_count, _ = move_duplicates(target, dups, undo_manager=undo_mgr, dry_run=self.dry_run_var.get())
+                    msg = f"Done! Moved {moved_count} extra duplicate file(s) to '_duplicates/'."
+                    self.root.after(0, lambda: self._log(msg))
+                    self.root.after(0, lambda: messagebox.showinfo("Duplicates Isolated", msg))
+            except Exception as e:
+                self.root.after(0, lambda: self._log(f"Error moving duplicates: {e}"))
+                self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
+            finally:
+                self.root.after(0, lambda: self._set_buttons_state("normal"))
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -187,13 +326,12 @@ class OrganizerGUI:
 
         confirm = messagebox.askyesno(
             "Confirm Undo",
-            f"Are you sure you want to revert the last organize operation in:\n{target}?",
+            f"Are you sure you want to revert the last operation in:\n{target}?",
         )
         if not confirm:
             return
 
-        self.organize_btn.configure(state="disabled")
-        self.undo_btn.configure(state="disabled")
+        self._set_buttons_state("disabled")
         self._log(f"\n--- Reverting last operation on: {target} ---")
 
         def run():
@@ -212,8 +350,7 @@ class OrganizerGUI:
                 self.root.after(0, lambda: self._log(f"Error during undo: {e}"))
                 self.root.after(0, lambda: messagebox.showerror("Undo Error", str(e)))
             finally:
-                self.root.after(0, lambda: self.organize_btn.configure(state="normal"))
-                self.root.after(0, lambda: self.undo_btn.configure(state="normal"))
+                self.root.after(0, lambda: self._set_buttons_state("normal"))
 
         threading.Thread(target=run, daemon=True).start()
 

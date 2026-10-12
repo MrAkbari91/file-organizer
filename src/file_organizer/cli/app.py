@@ -4,8 +4,23 @@ import argparse
 import sys
 from pathlib import Path
 from file_organizer import __version__
+from file_organizer.core.duplicates import (
+    DuplicateMethod,
+    calculate_duplicate_space,
+    find_duplicates,
+    move_duplicates,
+)
 from file_organizer.core.organizer import FileOrganizer, OrganizeMode
 from file_organizer.core.undo import UndoManager
+
+
+def format_bytes(num_bytes: int) -> str:
+    """Format bytes into readable string (KB, MB, GB)."""
+    for unit in ["B", "KB", "MB", "GB"]:
+        if num_bytes < 1024.0:
+            return f"{num_bytes:.2f} {unit}"
+        num_bytes /= 1024.0
+    return f"{num_bytes:.2f} TB"
 
 
 def main() -> None:
@@ -38,10 +53,28 @@ def main() -> None:
         help="Organize files by modification date (e.g., 2026/October/)",
     )
 
+    # Duplicate options
+    parser.add_argument(
+        "--find-duplicates",
+        action="store_true",
+        help="Scan and report duplicate files without organizing",
+    )
+    parser.add_argument(
+        "--move-duplicates",
+        action="store_true",
+        help="Find and isolate redundant duplicate files into _duplicates/ folder",
+    )
+    parser.add_argument(
+        "--dup-method",
+        choices=["exact", "converted", "visual"],
+        default="exact",
+        help="Duplicate detection method: 'exact' (SHA-256 binary), 'converted' (same name across jpg/png/webp), 'visual' (pixel similarity)",
+    )
+
     parser.add_argument(
         "--no-sub-extension",
         action="store_true",
-        help="In Category mode, do not create extension subfolders (put directly in Category/)",
+        help="Do not create extension subfolders inside Category or Date folders",
     )
     parser.add_argument(
         "-r",
@@ -94,7 +127,37 @@ def main() -> None:
                 print(f"  - {err}")
         return
 
-    # Determine sorting mode
+    # Handle Duplicate Detection
+    if args.find_duplicates or args.move_duplicates:
+        method = DuplicateMethod(args.dup_method)
+        print(f"\n🔍 Scanning duplicates in: {target_path} (Method: {method.value}, Recursive: {args.recursive})")
+        dups = find_duplicates(target_path, method=method, recursive=args.recursive)
+
+        if not dups:
+            print("🎉 No duplicate or converted format files found!")
+            return
+
+        wasted = calculate_duplicate_space(dups)
+        total_dup_files = sum(len(files) - 1 for files in dups.values())
+        print(f"\n⚠️  Found {len(dups)} duplicate group(s) ({total_dup_files} redundant files, ~{format_bytes(wasted)} can be saved):\n")
+
+        for idx, (key, files) in enumerate(dups.items(), 1):
+            label = key if len(key) < 30 else f"{key[:20]}..."
+            print(f"Group #{idx} [{label}]:")
+            print(f"  [Keep/Original] -> {files[0].name} ({format_bytes(files[0].stat().st_size)})")
+            for extra in files[1:]:
+                print(f"  [Duplicate/Copy] -> {extra.name} ({format_bytes(extra.stat().st_size)})")
+
+        if args.move_duplicates:
+            undo_mgr = UndoManager(target_path)
+            moved_count, _ = move_duplicates(target_path, dups, undo_manager=undo_mgr, dry_run=args.dry_run)
+            action = "[DRY-RUN] Would move" if args.dry_run else "Moved"
+            print(f"\n📦 {action} {moved_count} redundant file(s) into '_duplicates/' folder.")
+            if not args.dry_run:
+                print("💡 You can revert this anytime using `--undo`.")
+        return
+
+    # Normal Organize workflow
     if args.by_category:
         mode = OrganizeMode.CATEGORY
     elif args.by_date:
