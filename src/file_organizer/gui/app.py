@@ -1,21 +1,22 @@
-"""GUI entry point module with functional folder picker and organizer."""
+"""GUI entry point module with functional folder picker, category selection, and organizer."""
 
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from pathlib import Path
 from file_organizer import __version__
-from file_organizer.core.organizer import FileOrganizer
+from file_organizer.core.organizer import FileOrganizer, OrganizeMode
 
 
 class OrganizerGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title(f"File Organizer Pro v{__version__}")
-        self.root.geometry("600x420")
-        self.root.minsize(500, 350)
+        self.root.geometry("620x460")
+        self.root.minsize(520, 380)
 
         self.selected_folder = tk.StringVar(value="")
+        self.organize_mode = tk.StringVar(value=OrganizeMode.EXTENSION.value)
         self.dry_run_var = tk.BooleanVar(value=False)
 
         self._build_ui()
@@ -23,7 +24,7 @@ class OrganizerGUI:
     def _build_ui(self):
         # Folder selection frame
         folder_frame = ttk.LabelFrame(self.root, text="Select Target Folder", padding=10)
-        folder_frame.pack(fill="x", padx=15, pady=10)
+        folder_frame.pack(fill="x", padx=15, pady=8)
 
         entry = ttk.Entry(folder_frame, textvariable=self.selected_folder)
         entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
@@ -31,8 +32,26 @@ class OrganizerGUI:
         browse_btn = ttk.Button(folder_frame, text="Browse...", command=self._browse_folder)
         browse_btn.pack(side="right")
 
+        # Sorting Mode frame
+        mode_frame = ttk.LabelFrame(self.root, text="Sorting Mode", padding=8)
+        mode_frame.pack(fill="x", padx=15, pady=5)
+
+        ttk.Radiobutton(
+            mode_frame,
+            text="By Extension (e.g., jpg/, pdf/, zip/)",
+            variable=self.organize_mode,
+            value=OrganizeMode.EXTENSION.value,
+        ).pack(side="left", padx=(0, 20))
+
+        ttk.Radiobutton(
+            mode_frame,
+            text="By Category (e.g., Images/, Documents/, Videos/, Code/)",
+            variable=self.organize_mode,
+            value=OrganizeMode.CATEGORY.value,
+        ).pack(side="left")
+
         # Options frame
-        opts_frame = ttk.Frame(self.root, padding=(15, 0))
+        opts_frame = ttk.Frame(self.root, padding=(15, 4))
         opts_frame.pack(fill="x")
 
         dry_run_cb = ttk.Checkbutton(
@@ -43,7 +62,7 @@ class OrganizerGUI:
         dry_run_cb.pack(side="left")
 
         # Action Buttons frame
-        btn_frame = ttk.Frame(self.root, padding=(15, 10))
+        btn_frame = ttk.Frame(self.root, padding=(15, 8))
         btn_frame.pack(fill="x")
 
         self.organize_btn = ttk.Button(
@@ -53,7 +72,7 @@ class OrganizerGUI:
 
         # Log & status area
         log_frame = ttk.LabelFrame(self.root, text="Activity Log", padding=8)
-        log_frame.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+        log_frame.pack(fill="both", expand=True, padx=15, pady=(0, 12))
 
         self.log_text = tk.Text(log_frame, wrap="word", state="disabled", font=("Consolas", 9))
         scrollbar = ttk.Scrollbar(log_frame, command=self.log_text.yview)
@@ -86,12 +105,16 @@ class OrganizerGUI:
             return
 
         self.organize_btn.configure(state="disabled")
-        self._log(f"\n--- Starting organization on: {target} ---")
+        selected_mode = OrganizeMode(self.organize_mode.get())
+        self._log(f"\n--- Starting organization on: {target} (Mode: {selected_mode.value}) ---")
 
-        # Run organize logic in background thread so GUI doesn't freeze
         def run():
             try:
-                organizer = FileOrganizer(target, dry_run=self.dry_run_var.get())
+                organizer = FileOrganizer(
+                    target,
+                    mode=selected_mode,
+                    dry_run=self.dry_run_var.get(),
+                )
                 stats = organizer.organize()
                 summary = f"Completed! Moved: {stats['moved']} | Skipped: {stats['skipped']} | Errors: {stats['errors']}"
                 self.root.after(0, lambda: self._log(summary))

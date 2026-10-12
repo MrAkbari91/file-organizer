@@ -1,7 +1,7 @@
 """Tests for Core FileOrganizer logic."""
 
 from pathlib import Path
-from file_organizer.core.organizer import FileOrganizer
+from file_organizer.core.organizer import FileOrganizer, OrganizeMode
 
 
 def test_organize_files_by_extension(temp_dir: Path):
@@ -11,7 +11,7 @@ def test_organize_files_by_extension(temp_dir: Path):
     (temp_dir / "notes.txt").write_text("dummy note")
     (temp_dir / ".hidden").write_text("hidden file")
 
-    organizer = FileOrganizer(temp_dir)
+    organizer = FileOrganizer(temp_dir, mode=OrganizeMode.EXTENSION)
     stats = organizer.organize()
 
     # Verify files moved to correct extension folders
@@ -23,6 +23,29 @@ def test_organize_files_by_extension(temp_dir: Path):
     assert (temp_dir / ".hidden").exists()
 
     assert stats["moved"] == 3
+    assert stats["skipped"] == 0
+
+
+def test_organize_files_by_category(temp_dir: Path):
+    # Setup sample files
+    (temp_dir / "document.pdf").write_text("pdf")
+    (temp_dir / "photo.png").write_text("photo")
+    (temp_dir / "song.mp3").write_text("audio")
+    (temp_dir / "script.py").write_text("code")
+    (temp_dir / "archive.zip").write_text("zip")
+    (temp_dir / "custom.unknown_ext").write_text("other")
+
+    organizer = FileOrganizer(temp_dir, mode=OrganizeMode.CATEGORY)
+    stats = organizer.organize()
+
+    assert (temp_dir / "Documents" / "document.pdf").exists()
+    assert (temp_dir / "Images" / "photo.png").exists()
+    assert (temp_dir / "Audio" / "song.mp3").exists()
+    assert (temp_dir / "Code" / "script.py").exists()
+    assert (temp_dir / "Archives" / "archive.zip").exists()
+    assert (temp_dir / "Others" / "custom.unknown_ext").exists()
+
+    assert stats["moved"] == 6
     assert stats["skipped"] == 0
 
 
