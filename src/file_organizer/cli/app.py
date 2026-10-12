@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from file_organizer import __version__
 from file_organizer.core.organizer import FileOrganizer, OrganizeMode
+from file_organizer.core.undo import UndoManager
 
 
 def main() -> None:
@@ -34,6 +35,12 @@ def main() -> None:
     )
 
     parser.add_argument(
+        "-u",
+        "--undo",
+        action="store_true",
+        help="Undo/revert the last organize operation in the target folder",
+    )
+    parser.add_argument(
         "-d",
         "--dry-run",
         action="store_true",
@@ -52,6 +59,20 @@ def main() -> None:
     if not target_path.exists() or not target_path.is_dir():
         print(f"Error: Path is not a valid directory: {target_path}", file=sys.stderr)
         sys.exit(1)
+
+    # Handle Undo
+    if args.undo:
+        undo_mgr = UndoManager(target_path)
+        reverted, error_count, errors = undo_mgr.undo_last()
+        if error_count > 0 and reverted == 0:
+            print(f"Undo failed: {errors[0]}", file=sys.stderr)
+            sys.exit(1)
+        print(f"\n↩️  Undo Complete! Reverted {reverted} file(s).")
+        if errors:
+            print("Encountered errors:")
+            for err in errors:
+                print(f"  - {err}")
+        return
 
     mode = OrganizeMode.CATEGORY if args.by_category else OrganizeMode.EXTENSION
 

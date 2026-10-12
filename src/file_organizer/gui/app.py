@@ -1,4 +1,4 @@
-"""GUI entry point module with functional folder picker, category selection, and organizer."""
+"""GUI entry point module with functional folder picker, category selection, organizer, and undo support."""
 
 import threading
 import tkinter as tk
@@ -6,14 +6,15 @@ from tkinter import filedialog, messagebox, ttk
 from pathlib import Path
 from file_organizer import __version__
 from file_organizer.core.organizer import FileOrganizer, OrganizeMode
+from file_organizer.core.undo import UndoManager
 
 
 class OrganizerGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title(f"File Organizer Pro v{__version__}")
-        self.root.geometry("620x460")
-        self.root.minsize(520, 380)
+        self.root.geometry("640x480")
+        self.root.minsize(540, 400)
 
         self.selected_folder = tk.StringVar(value="")
         self.organize_mode = tk.StringVar(value=OrganizeMode.EXTENSION.value)
@@ -70,6 +71,11 @@ class OrganizerGUI:
         )
         self.organize_btn.pack(side="left", padx=(0, 10))
 
+        self.undo_btn = ttk.Button(
+            btn_frame, text="↩ Undo Last Operation", command=self._start_undo
+        )
+        self.undo_btn.pack(side="left")
+
         # Log & status area
         log_frame = ttk.LabelFrame(self.root, text="Activity Log", padding=8)
         log_frame.pack(fill="both", expand=True, padx=15, pady=(0, 12))
@@ -105,6 +111,7 @@ class OrganizerGUI:
             return
 
         self.organize_btn.configure(state="disabled")
+        self.undo_btn.configure(state="disabled")
         selected_mode = OrganizeMode(self.organize_mode.get())
         self._log(f"\n--- Starting organization on: {target} (Mode: {selected_mode.value}) ---")
 
@@ -124,6 +131,50 @@ class OrganizerGUI:
                 self.root.after(0, lambda: messagebox.showerror("Error", str(e)))
             finally:
                 self.root.after(0, lambda: self.organize_btn.configure(state="normal"))
+                self.root.after(0, lambda: self.undo_btn.configure(state="normal"))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _start_undo(self):
+        folder_path = self.selected_folder.get().strip()
+        if not folder_path:
+            messagebox.showwarning("No Folder Selected", "Please select a target folder first!")
+            return
+
+        target = Path(folder_path)
+        if not target.is_dir():
+            messagebox.showerror("Invalid Directory", "The specified path is not a valid folder.")
+            return
+
+        confirm = messagebox.askyesno(
+            "Confirm Undo",
+            f"Are you sure you want to revert the last organize operation in:\n{target}?",
+        )
+        if not confirm:
+            return
+
+        self.organize_btn.configure(state="disabled")
+        self.undo_btn.configure(state="disabled")
+        self._log(f"\n--- Reverting last operation on: {target} ---")
+
+        def run():
+            try:
+                undo_mgr = UndoManager(target)
+                reverted, error_count, errors = undo_mgr.undo_last()
+                if error_count > 0 and reverted == 0:
+                    msg = f"Undo failed: {errors[0]}"
+                    self.root.after(0, lambda: self._log(msg))
+                    self.root.after(0, lambda: messagebox.showwarning("Undo Failed", msg))
+                else:
+                    msg = f"Undo Finished! Successfully reverted {reverted} file(s)."
+                    self.root.after(0, lambda: self._log(msg))
+                    self.root.after(0, lambda: messagebox.showinfo("Undo Successful", msg))
+            except Exception as e:
+                self.root.after(0, lambda: self._log(f"Error during undo: {e}"))
+                self.root.after(0, lambda: messagebox.showerror("Undo Error", str(e)))
+            finally:
+                self.root.after(0, lambda: self.organize_btn.configure(state="normal"))
+                self.root.after(0, lambda: self.undo_btn.configure(state="normal"))
 
         threading.Thread(target=run, daemon=True).start()
 

@@ -1,10 +1,11 @@
-"""Core file organizer logic supporting extension and category modes."""
+"""Core file organizer logic supporting extension and category modes, plus undo manifest tracking."""
 
 import shutil
 from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional
 from file_organizer.core.categories import get_file_category
+from file_organizer.core.undo import UndoManager
 from file_organizer.core.utils import (
     can_read_write,
     get_safe_destination,
@@ -30,6 +31,7 @@ class FileOrganizer:
         self.target_folder = Path(target_folder).resolve()
         self.mode = mode
         self.dry_run = dry_run
+        self.undo_manager = UndoManager(self.target_folder)
         self.stats = {
             "moved": 0,
             "skipped": 0,
@@ -46,12 +48,14 @@ class FileOrganizer:
         if self.dry_run:
             print("🔍 [DRY RUN MODE] - No files will actually be moved.\n")
 
+        recorded_moves: List[Dict[str, str]] = []
+
         for item in list(self.target_folder.iterdir()):
             # Only process files directly under the target directory
             if not item.is_file():
                 continue
 
-            # Skip hidden files like .gitignore, .DS_Store
+            # Skip hidden files and history folder
             if is_hidden_file(item):
                 continue
 
@@ -79,6 +83,10 @@ class FileOrganizer:
                 if not self.dry_run:
                     dest_folder.mkdir(parents=True, exist_ok=True)
                     shutil.move(str(item), str(dest_file))
+                    recorded_moves.append({
+                        "source": str(item),
+                        "destination": str(dest_file),
+                    })
 
                 action = "[DRY-RUN] Would move" if self.dry_run else "Moved"
                 print(f"✅ {action}: {item.name} -> {folder_name}/")
@@ -87,5 +95,13 @@ class FileOrganizer:
                 print(f"❌ Error moving {item.name}: {e}")
                 self.stats["errors"] += 1
 
+        # Record manifest for undo capability
+        if not self.dry_run and recorded_moves:
+            self.undo_manager.record_manifest(recorded_moves)
+
         print(f"\nDone! Moved: {self.stats['moved']}, Skipped: {self.stats['skipped']}, Errors: {self.stats['errors']}")
         return self.stats
+
+    def undo(self):
+        """Revert the last organize operation."""
+        return self.undo_manager.undo_last()
