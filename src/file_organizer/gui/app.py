@@ -1,4 +1,4 @@
-"""GUI entry point module with functional folder picker, category selection, organizer, and undo support."""
+"""GUI entry point module with functional folder picker, sorting modes, sub-extension nesting, recursive option, and undo support."""
 
 import threading
 import tkinter as tk
@@ -13,11 +13,14 @@ class OrganizerGUI:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title(f"File Organizer Pro v{__version__}")
-        self.root.geometry("640x480")
-        self.root.minsize(540, 400)
+        self.root.geometry("690x550")
+        self.root.minsize(590, 460)
 
         self.selected_folder = tk.StringVar(value="")
-        self.organize_mode = tk.StringVar(value=OrganizeMode.EXTENSION.value)
+        self.organize_mode = tk.StringVar(value=OrganizeMode.CATEGORY.value)
+        self.sub_ext_var = tk.BooleanVar(value=True)
+        self.recursive_var = tk.BooleanVar(value=False)
+        self.clean_empty_var = tk.BooleanVar(value=False)
         self.dry_run_var = tk.BooleanVar(value=False)
 
         self._build_ui()
@@ -39,31 +42,58 @@ class OrganizerGUI:
 
         ttk.Radiobutton(
             mode_frame,
-            text="By Extension (e.g., jpg/, pdf/, zip/)",
+            text="By Category (Images/, Code/, Videos/)",
             variable=self.organize_mode,
-            value=OrganizeMode.EXTENSION.value,
-        ).pack(side="left", padx=(0, 20))
+            value=OrganizeMode.CATEGORY.value,
+        ).pack(side="left", padx=(0, 15))
 
         ttk.Radiobutton(
             mode_frame,
-            text="By Category (e.g., Images/, Documents/, Videos/, Code/)",
+            text="By Extension (jpg/, pdf/)",
             variable=self.organize_mode,
-            value=OrganizeMode.CATEGORY.value,
+            value=OrganizeMode.EXTENSION.value,
+        ).pack(side="left", padx=(0, 15))
+
+        ttk.Radiobutton(
+            mode_frame,
+            text="By Date (2026/October/)",
+            variable=self.organize_mode,
+            value=OrganizeMode.DATE.value,
         ).pack(side="left")
 
         # Options frame
-        opts_frame = ttk.Frame(self.root, padding=(15, 4))
-        opts_frame.pack(fill="x")
+        opts_frame = ttk.LabelFrame(self.root, text="Options", padding=8)
+        opts_frame.pack(fill="x", padx=15, pady=5)
 
-        dry_run_cb = ttk.Checkbutton(
+        ttk.Checkbutton(
             opts_frame,
-            text="Dry Run (Preview only, do not actually move files)",
+            text="Separate extensions inside Category & Date (e.g. Images/jpg/, 2026/October/pdf/)",
+            variable=self.sub_ext_var,
+        ).pack(anchor="w", pady=(0, 4))
+
+        row2 = ttk.Frame(opts_frame)
+        row2.pack(fill="x")
+
+        ttk.Checkbutton(
+            row2,
+            text="Recursive (include subdirectories)",
+            variable=self.recursive_var,
+        ).pack(side="left", padx=(0, 15))
+
+        ttk.Checkbutton(
+            row2,
+            text="Clean empty directories",
+            variable=self.clean_empty_var,
+        ).pack(side="left", padx=(0, 15))
+
+        ttk.Checkbutton(
+            row2,
+            text="Dry Run (preview only)",
             variable=self.dry_run_var,
-        )
-        dry_run_cb.pack(side="left")
+        ).pack(side="left")
 
         # Action Buttons frame
-        btn_frame = ttk.Frame(self.root, padding=(15, 8))
+        btn_frame = ttk.Frame(self.root, padding=(15, 6))
         btn_frame.pack(fill="x")
 
         self.organize_btn = ttk.Button(
@@ -113,17 +143,26 @@ class OrganizerGUI:
         self.organize_btn.configure(state="disabled")
         self.undo_btn.configure(state="disabled")
         selected_mode = OrganizeMode(self.organize_mode.get())
-        self._log(f"\n--- Starting organization on: {target} (Mode: {selected_mode.value}) ---")
+        self._log(
+            f"\n--- Starting organization on: {target} (Mode: {selected_mode.value}, "
+            f"Sub-extensions: {self.sub_ext_var.get()}, Recursive: {self.recursive_var.get()}) ---"
+        )
 
         def run():
             try:
                 organizer = FileOrganizer(
                     target,
                     mode=selected_mode,
+                    sub_extension=self.sub_ext_var.get(),
+                    recursive=self.recursive_var.get(),
+                    clean_empty=self.clean_empty_var.get(),
                     dry_run=self.dry_run_var.get(),
                 )
                 stats = organizer.organize()
-                summary = f"Completed! Moved: {stats['moved']} | Skipped: {stats['skipped']} | Errors: {stats['errors']}"
+                summary = (
+                    f"Completed! Moved: {stats['moved']} | Skipped: {stats['skipped']} | "
+                    f"Errors: {stats['errors']} | Cleaned Folders: {stats.get('cleaned_dirs', 0)}"
+                )
                 self.root.after(0, lambda: self._log(summary))
                 self.root.after(0, lambda: messagebox.showinfo("Finished", summary))
             except Exception as e:

@@ -1,4 +1,4 @@
-"""Cross-platform utility functions for file path, permission, and attribute handling."""
+"""Cross-platform utility functions for file path, permission, attribute handling, and cleaning empty directories."""
 
 import os
 import sys
@@ -35,7 +35,6 @@ def normalize_extension(path: Path) -> str:
 def can_read_write(path: Path) -> bool:
     """Verify read and write permissions for a given file or directory."""
     if not path.exists():
-        # Check parent folder write permission
         parent = path.parent
         return parent.exists() and os.access(parent, os.W_OK)
     return os.access(path, os.R_OK) and os.access(path, os.W_OK)
@@ -68,3 +67,31 @@ def is_path_inside(child: Path, parent: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def remove_empty_folders(root_dir: Path) -> int:
+    """
+    Recursively remove empty directories bottom-up under root_dir.
+    Does not remove root_dir itself or hidden history folders.
+    Returns count of removed directories.
+    """
+    removed_count = 0
+    # Walk bottom-up
+    for dirpath, dirnames, filenames in os.walk(str(root_dir), topdown=False):
+        current = Path(dirpath)
+        if current.resolve() == root_dir.resolve():
+            continue
+
+        # Skip hidden folders like .file_organizer_history
+        if current.name.startswith("."):
+            continue
+
+        try:
+            # Check if directory is empty
+            if not any(current.iterdir()):
+                current.rmdir()
+                removed_count += 1
+        except OSError:
+            pass
+
+    return removed_count

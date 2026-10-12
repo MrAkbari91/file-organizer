@@ -8,12 +8,12 @@ def test_get_file_category_standard():
     assert get_file_category(Path("photo.JPG")) == "Images"
     assert get_file_category(Path("vector.svg")) == "Images"
     assert get_file_category(Path("doc.pdf")) == "Documents"
-    assert get_file_category(Path("sheet.xlsx")) == "Documents"
+    assert get_file_category(Path("sheet.xlsx")) == "Spreadsheets"
     assert get_file_category(Path("song.mp3")) == "Audio"
     assert get_file_category(Path("movie.mkv")) == "Videos"
     assert get_file_category(Path("backup.zip")) == "Archives"
     assert get_file_category(Path("script.py")) == "Code"
-    assert get_file_category(Path("installer.exe")) == "Executables"
+    assert get_file_category(Path("installer.exe")) == "Executables & Installers"
 
 
 def test_get_file_category_unmapped():

@@ -12,7 +12,7 @@ def main() -> None:
     """Entry point for CLI interface."""
     parser = argparse.ArgumentParser(
         prog="file-organizer",
-        description="Organize files in a directory into subfolders by extension or category.",
+        description="Organize files in a directory into subfolders by extension, category, or date.",
     )
     parser.add_argument(
         "folder",
@@ -25,15 +25,35 @@ def main() -> None:
     mode_group.add_argument(
         "--by-extension",
         action="store_true",
-        default=True,
-        help="Organize files by extension (e.g., jpg/, pdf/) [default]",
+        help="Organize files by extension directly (e.g., jpg/, pdf/) [default]",
     )
     mode_group.add_argument(
         "--by-category",
         action="store_true",
-        help="Organize files by category (e.g., Images/, Documents/, Videos/)",
+        help="Organize files by category and extension (e.g., Images/jpg/, Code/liquid/)",
+    )
+    mode_group.add_argument(
+        "--by-date",
+        action="store_true",
+        help="Organize files by modification date (e.g., 2026/October/)",
     )
 
+    parser.add_argument(
+        "--no-sub-extension",
+        action="store_true",
+        help="In Category mode, do not create extension subfolders (put directly in Category/)",
+    )
+    parser.add_argument(
+        "-r",
+        "--recursive",
+        action="store_true",
+        help="Process subdirectories recursively",
+    )
+    parser.add_argument(
+        "--clean-empty",
+        action="store_true",
+        help="Remove empty directories after organizing",
+    )
     parser.add_argument(
         "-u",
         "--undo",
@@ -74,10 +94,25 @@ def main() -> None:
                 print(f"  - {err}")
         return
 
-    mode = OrganizeMode.CATEGORY if args.by_category else OrganizeMode.EXTENSION
+    # Determine sorting mode
+    if args.by_category:
+        mode = OrganizeMode.CATEGORY
+    elif args.by_date:
+        mode = OrganizeMode.DATE
+    else:
+        mode = OrganizeMode.EXTENSION
+
+    sub_ext = not args.no_sub_extension
 
     try:
-        organizer = FileOrganizer(target_folder=target_path, mode=mode, dry_run=args.dry_run)
+        organizer = FileOrganizer(
+            target_folder=target_path,
+            mode=mode,
+            sub_extension=sub_ext,
+            recursive=args.recursive,
+            clean_empty=args.clean_empty,
+            dry_run=args.dry_run,
+        )
         organizer.organize()
     except Exception as exc:
         print(f"Failed to organize files: {exc}", file=sys.stderr)
