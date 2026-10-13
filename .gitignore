@@ -22,6 +22,7 @@ wheels/
 
 # Virtual Environments
 .venv/
+.venv-build/
 venv/
 ENV/
 env/
@@ -47,4 +48,10 @@ htmlcov/
 Thumbs.db
 
 # Documentation / Scratch
-feature_plan.md
+feature_plan.md
+
+# Project-local build dependencies
+.build-deps/
+.build-tools/
+# Keep the portable premium build spec under version control.
+!packaging/*.spec

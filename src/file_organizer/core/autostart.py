@@ -1,74 +1,101 @@
-"""System startup auto-run management (Windows/macOS/Linux) with explicit user consent."""
+"""Explicit Windows sign-in automation, including frozen executable support."""
 
+import json
 import os
+import subprocess
 import sys
 from pathlib import Path
-from typing import Optional
 
 APP_NAME = "FileOrganizerAutoWatch"
 
 
-def get_windows_startup_bat() -> Optional[Path]:
-    """Get path to the user's Windows Startup batch file."""
+def get_windows_startup_bat():
     if sys.platform != "win32":
         return None
     appdata = os.environ.get("APPDATA")
     if not appdata:
         return None
-    startup_dir = Path(appdata) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
-    if startup_dir.exists():
-        return startup_dir / f"{APP_NAME}.bat"
-    return None
+    folder = Path(appdata) / "Microsoft/Windows/Start Menu/Programs/Startup"
+    return folder / f"{APP_NAME}.bat" if folder.is_dir() else None
 
 
-def is_autostart_enabled() -> bool:
-    """Check if startup auto-watch is currently registered."""
-    if sys.platform == "win32":
-        bat_file = get_windows_startup_bat()
-        return bat_file.exists() if bat_file else False
-    return False
+def is_autostart_enabled():
+    path = get_windows_startup_bat()
+    return bool(path and (path.exists() or path.with_suffix(".vbs").exists()))
 
 
-def enable_autostart(target_folder: Path, mode: str = "category") -> bool:
-    """
-    Enable background auto-watch on system startup with explicit user action.
-    Creates a non-intrusive batch launcher in Windows Startup.
-    """
+def enable_autostart(
+    target_folder,
+    mode="category",
+    *,
+    recursive=False,
+    sub_extension=True,
+    clean_empty=False,
+    ignore_patterns=None,
+    config=None,
+):
+    legacy = get_windows_startup_bat()
+    if legacy is None:
+        return False
     target = Path(target_folder).resolve()
-
-    if sys.platform == "win32":
-        bat_file = get_windows_startup_bat()
-        if not bat_file:
-            return False
-
-        python_exe = sys.executable
-        # pythonw.exe launches without showing a black console window
-        pythonw_exe = Path(python_exe).parent / "pythonw.exe"
-        runner = str(pythonw_exe) if pythonw_exe.exists() else python_exe
-
-        # Command to run silent background watcher
-        content = (
-            "@echo off\n"
-            f'start "" "{runner}" -m file_organizer "{target}" --by-{mode} -w --watch-interval 5\n'
+    if not target.is_dir():
+        return False
+    storage = (
+        Path(os.environ.get("LOCALAPPDATA") or Path.home() / ".config")
+        / "FileOrganizer"
+    )
+    settings = storage / "startup.json"
+    values = dict(
+        folder=str(target),
+        mode=mode,
+        recursive=recursive,
+        sub_extension=sub_extension,
+        clean_empty=clean_empty,
+        ignore_patterns=ignore_patterns or [],
+        categories=config.custom_categories if config else {},
+    )
+    try:
+        storage.mkdir(parents=True, exist_ok=True)
+        settings.write_text(json.dumps(values, indent=2), encoding="utf-8")
+        if getattr(sys, "frozen", False):
+            args = [sys.executable, "--background-watch", str(settings)]
+        else:
+            runner = storage / "startup_runner.py"
+            source_root = Path(__file__).resolve().parents[2]
+            runner.write_text(
+                "import sys\nfrom pathlib import Path\nsys.path.insert(0, "
+                + repr(str(source_root))
+                + ")\nfrom file_organizer.gui.startup import run_background\nrun_background(Path(sys.argv[1]))\n",
+                encoding="utf-8",
+            )
+            pythonw = Path(sys.executable).with_name("pythonw.exe")
+            args = [
+                str(pythonw if pythonw.exists() else sys.executable),
+                str(runner),
+                str(settings),
+            ]
+        command = subprocess.list2cmdline(args)
+        # VBScript quotes escape by doubling. No cmd.exe interpolation of paths.
+        script = (
+            'Set shell = CreateObject("WScript.Shell")\nshell.Run "'
+            + command.replace('"', '""')
+            + '", 0, False\n'
         )
-
-        try:
-            bat_file.write_text(content, encoding="utf-8")
-            return True
-        except Exception:
-            return False
-
-    return False
+        path = legacy.with_suffix(".vbs")
+        path.write_text(script, encoding="utf-16")
+        legacy.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
 
 
-def disable_autostart() -> bool:
-    """Disable and completely remove startup auto-watch."""
-    if sys.platform == "win32":
-        bat_file = get_windows_startup_bat()
-        if bat_file and bat_file.exists():
-            try:
-                bat_file.unlink()
-                return True
-            except Exception:
-                return False
-    return True
+def disable_autostart():
+    legacy = get_windows_startup_bat()
+    if legacy is None:
+        return True
+    try:
+        legacy.unlink(missing_ok=True)
+        legacy.with_suffix(".vbs").unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False

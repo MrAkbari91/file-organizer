@@ -1,114 +1,124 @@
-name: Build & Release
+name: Test, Build & Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   build:
-    name: Build Standalone Binaries
+    name: Test and build ${{ matrix.platform }}
+    timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - os: windows-latest
-            platform: windows
-            cli_ext: .exe
-            gui_ext: .exe
-            asset_cli: file-organizer-cli-windows-x64.exe
-            asset_gui: file-organizer-gui-windows-x64.exe
-          - os: macos-latest
-            platform: macos
-            cli_ext: ""
-            gui_ext: ""
-            asset_cli: file-organizer-cli-macos-x64
-            asset_gui: file-organizer-gui-macos-x64
-          - os: ubuntu-latest
-            platform: linux
-            cli_ext: ""
-            gui_ext: ""
-            asset_cli: file-organizer-cli-linux-x64
-            asset_gui: file-organizer-gui-linux-x64
-
+          - os: windows-2022
+            platform: windows-x64
+          - os: ubuntu-22.04
+            platform: linux-x64
+          - os: macos-15-intel
+            platform: macos-x64
+          - os: macos-15
+            platform: macos-arm64
     runs-on: ${{ matrix.os }}
-
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONUTF8: '1'
+      PYTHONUNBUFFERED: '1'
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
-      - name: Install Dependencies
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements*.txt
+      - name: Install Linux GUI libraries
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y xvfb xauth python3-tk libx11-6 libxext6 libxrender1
+      - name: Install dependencies
+        run: python -m pip install -r requirements-build.txt -e '.[dev]'
+      - name: Check syntax and Tk installation
         run: |
-          python -m pip install --upgrade pip
-          pip install pyinstaller
-          pip install -e .
-
-      - name: Build CLI Binary
-        run: |
-          pyinstaller --noconfirm --clean --onefile --paths src --name "file-organizer-cli${{ matrix.cli_ext }}" src/file_organizer/cli/app.py
-
-      - name: Build GUI Binary
-        run: |
-          pyinstaller --noconfirm --clean --onefile --windowed --paths src --name "file-organizer-gui${{ matrix.gui_ext }}" src/file_organizer/gui/app.py
-
-      - name: Rename Binaries for Release Artifacts (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          Move-Item "dist/file-organizer-cli.exe" "dist/${{ matrix.asset_cli }}"
-          Move-Item "dist/file-organizer-gui.exe" "dist/${{ matrix.asset_gui }}"
-
-      - name: Rename Binaries for Release Artifacts (Unix)
-        if: runner.os != 'Windows'
-        run: |
-          mv dist/file-organizer-cli dist/${{ matrix.asset_cli }}
-          mv dist/file-organizer-gui dist/${{ matrix.asset_gui }}
-
-      - name: Upload Artifacts
+          python -m compileall -q src scripts tests packaging
+          python -c "import tkinter, customtkinter; print('Tk:', tkinter.TkVersion)"
+      - name: Run tests (Linux virtual display)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a -s '-screen 0 1920x1080x24' python -m pytest --junitxml=build/test-results.xml
+      - name: Run tests (Windows and macOS)
+        if: runner.os != 'Linux'
+        run: python -m pytest --junitxml=build/test-results.xml
+      - name: Build, verify executables and archive (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a -s '-screen 0 1920x1080x24' python scripts/build.py --verify --archive
+      - name: Build, verify executables and archive (Windows and macOS)
+        if: runner.os != 'Linux'
+        run: python scripts/build.py --verify --archive
+      - name: Upload verified bundles
         uses: actions/upload-artifact@v4
         with:
           name: binaries-${{ matrix.platform }}
+          path: dist/releases/*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload test and build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-${{ matrix.platform }}
           path: |
-            dist/${{ matrix.asset_cli }}
-            dist/${{ matrix.asset_gui }}
+            build/test-results.xml
+            build/verification/*.json
+            build/**/warn-*.txt
+          if-no-files-found: ignore
+
+  python-compatibility:
+    name: Python ${{ matrix.python }} compatibility
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: sudo apt-get update && sudo apt-get install -y xvfb xauth python3-tk
+      - run: python -m pip install -e '.[dev]'
+      - run: xvfb-run -a -s '-screen 0 1920x1080x24' python -m pytest
 
   release:
-    name: Create GitHub Release
-    needs: build
+    name: Publish versioned release
+    if: startsWith(github.ref, 'refs/tags/v') && github.event_name == 'push'
+    needs: [build, python-compatibility]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Download Windows Artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          name: binaries-windows
-          path: release-assets/
-
-      - name: Download macOS Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: binaries-macos
-          path: release-assets/
-
-      - name: Download Linux Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: binaries-linux
-          path: release-assets/
-
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+          pattern: binaries-*
+          merge-multiple: true
+          path: release-assets
+      - uses: softprops/action-gh-release@v2
         with:
           files: release-assets/*
+          fail_on_unmatched_files: true
           generate_release_notes: true
           draft: false
           prerelease: false

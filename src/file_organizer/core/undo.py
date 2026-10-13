@@ -1,113 +1,159 @@
-"""Undo and rollback management for File Organizer."""
+"""Durable move journals and conservative rollback of existing manifests."""
 
 import json
-import shutil
+import os
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from file_organizer.core.safety import (
+    fingerprint,
+    validate_inside,
+    move_no_replace,
+    check_cancel,
+)
 
 HISTORY_DIR_NAME = ".file_organizer_history"
 
 
-class UndoManager:
-    """Manages recording and reverting file organize operations."""
+class MoveJournal:
+    """Flush each intent before moving. A crash leaves a recoverable record."""
 
-    def __init__(self, target_folder: Path):
+    def __init__(self, manager):
+        self.manager = manager
+        self.path = None
+
+    def move(self, source, destination):
+        signature = fingerprint(source)
+        if self.path is None:
+            folder = self.manager._ensure_history_dir()
+            self.path = folder / (
+                "manifest_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f") + ".jsonl"
+            )
+        entry = {
+            "source": str(source),
+            "destination": str(destination),
+            "signature": signature,
+        }
+        with self.path.open("a", encoding="utf-8") as file:
+            file.write(json.dumps(entry) + "\n")
+            file.flush()
+            os.fsync(file.fileno())
+        move_no_replace(source, destination)
+        return entry
+
+
+class UndoManager:
+    def __init__(self, target_folder):
         self.target_folder = Path(target_folder).resolve()
         self.history_dir = self.target_folder / HISTORY_DIR_NAME
 
-    def _ensure_history_dir(self) -> Path:
-        """Create history directory if missing."""
+    def _ensure_history_dir(self):
+        validate_inside(self.history_dir, self.target_folder)
         self.history_dir.mkdir(parents=True, exist_ok=True)
         return self.history_dir
 
-    def record_manifest(self, moves: List[Dict[str, str]]) -> Optional[Path]:
-        """
-        Record a list of moves as a timestamped JSON manifest.
-        moves format: [{'source': '/orig/path', 'destination': '/dest/path'}]
-        """
+    def record_manifest(self, moves):
         if not moves:
             return None
-
         self._ensure_history_dir()
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        manifest_file = self.history_dir / f"manifest_{timestamp}.json"
+        path = self.history_dir / (
+            "manifest_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f") + ".json"
+        )
+        self._save(path, moves)
+        return path
 
+    def _save(self, path, moves):
+        temporary = path.with_suffix(".tmp")
         data = {
             "timestamp": datetime.now().isoformat(),
             "target_folder": str(self.target_folder),
             "moves_count": len(moves),
             "moves": moves,
         }
+        with temporary.open("w", encoding="utf-8") as file:
+            json.dump(data, file, indent=2)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
 
-        with open(manifest_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-
-        return manifest_file
-
-    def get_latest_manifest(self) -> Optional[Path]:
-        """Find the most recent manifest file in the history directory."""
+    def manifests(self):
         if not self.history_dir.exists():
-            return None
-
-        manifests = sorted(
-            self.history_dir.glob("manifest_*.json"),
-            key=lambda p: p.stat().st_mtime,
+            return []
+        validate_inside(self.history_dir, self.target_folder)
+        return sorted(
+            [
+                *self.history_dir.glob("manifest_*.json"),
+                *self.history_dir.glob("manifest_*.jsonl"),
+            ],
+            key=lambda p: p.name,
             reverse=True,
         )
-        return manifests[0] if manifests else None
 
-    def undo_last(self) -> Tuple[int, int, List[str]]:
-        """
-        Roll back the most recent organize operation.
-        Returns (reverted_count, error_count, list_of_errors).
-        """
+    def get_latest_manifest(self):
+        return next(iter(self.manifests()), None)
+
+    def read_manifest(self, path):
+        validate_inside(path, self.target_folder)
+        text = path.read_text(encoding="utf-8")
+        if path.suffix == ".jsonl":
+            moves = []
+            for line in text.splitlines():
+                try:
+                    moves.append(json.loads(line))
+                except ValueError:
+                    # An incomplete final append cannot describe a completed move.
+                    break
+            return moves
+        return json.loads(text).get("moves", [])
+
+    def undo_last(self, cancel_event=None, progress=None):
         latest = self.get_latest_manifest()
-        if not latest:
+        if latest is None:
             return 0, 0, ["No history manifests found to undo."]
-
         try:
-            with open(latest, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except Exception as e:
-            return 0, 1, [f"Failed to read manifest {latest.name}: {e}"]
-
-        moves = data.get("moves", [])
-        reverted = 0
-        errors: List[str] = []
-
-        # Revert in reverse order
-        for move in reversed(moves):
-            src = Path(move["source"])
-            dest = Path(move["destination"])
-
-            if not dest.exists():
-                errors.append(f"Destination file no longer exists: {dest}")
-                continue
-
+            moves = self.read_manifest(latest)
+        except (OSError, ValueError) as error:
+            return 0, 1, [f"Failed to read history: {error}"]
+        reverted, errors, remaining = 0, [], []
+        for index, move in enumerate(reversed(moves)):
+            if cancel_event is not None and cancel_event.is_set():
+                remaining.extend(list(reversed(moves))[index:])
+                break
             try:
-                # Ensure original directory exists
+                src = validate_inside(Path(move["source"]), self.target_folder)
+                dest = validate_inside(Path(move["destination"]), self.target_folder)
+                if not dest.exists():
+                    if src.exists():
+                        continue  # intent failed, or already restored before a crash
+                    raise FileNotFoundError(f"Moved file is missing: {dest}")
+                if src.exists():
+                    raise FileExistsError(f"Original location is occupied: {src}")
+                if move.get("signature") and tuple(move["signature"]) != fingerprint(
+                    dest
+                ):
+                    raise ValueError(f"Moved file has changed; left untouched: {dest}")
                 src.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(dest), str(src))
+                move_no_replace(dest, src)
                 reverted += 1
-
-                # Clean up empty destination folder if empty
-                if dest.parent != self.target_folder and dest.parent.exists():
+                if dest.parent != self.target_folder:
                     try:
                         dest.parent.rmdir()
                     except OSError:
-                        # Directory not empty, leave it
                         pass
-            except Exception as e:
-                errors.append(f"Failed to revert {dest} -> {src}: {e}")
-
-        # Remove the applied manifest
-        try:
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                errors.append(str(error))
+                remaining.append(move)
+            if progress:
+                progress(index + 1, len(moves), "Restoring files")
+        if remaining:
+            # Preserve unsuccessful entries for a later retry, with original order.
+            replacement = latest.with_suffix(".json")
+            self._save(replacement, list(reversed(remaining)))
+            if replacement != latest:
+                latest.unlink()
+        else:
             latest.unlink()
-            # If history folder is empty, clean it up
-            if not any(self.history_dir.iterdir()):
+            try:
                 self.history_dir.rmdir()
-        except Exception:
-            pass
-
+            except OSError:
+                pass
         return reverted, len(errors), errors

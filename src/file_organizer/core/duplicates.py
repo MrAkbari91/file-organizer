@@ -1,250 +1,187 @@
-"""Duplicate file detection: Exact Binary (SHA-256), Converted Formats (Same Name/Stem), and Visual Similarity."""
+"""Cancellable duplicate scans with size filtering and stat-validated hash caching."""
 
 import hashlib
-import os
-import shutil
 from enum import Enum
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 from file_organizer.core.categories import get_file_category
-from file_organizer.core.undo import UndoManager
-from file_organizer.core.utils import is_hidden_file
+from file_organizer.core.config import ConfigManager
+from file_organizer.core.safety import (
+    iter_files,
+    fingerprint,
+    check_cancel,
+    validate_inside,
+)
+from file_organizer.core.undo import UndoManager, MoveJournal
 
-CHUNK_SIZE = 64 * 1024  # 64 KB chunks
+CHUNK_SIZE = 1024 * 1024
 DUPLICATES_FOLDER_NAME = "_duplicates"
 
 
 class DuplicateMethod(str, Enum):
-    EXACT = "exact"            # SHA-256 content hash
-    CONVERTED = "converted"    # Same base filename with different extensions (e.g. photo.jpg vs photo.webp)
-    VISUAL = "visual"          # Pixel-based perceptual similarity (if Pillow installed)
+    EXACT = "exact"
+    CONVERTED = "converted"
+    VISUAL = "visual"
 
 
-def get_file_hash(file_path: Path) -> str:
-    """Calculate SHA-256 hash of a file efficiently using chunks."""
-    hasher = hashlib.sha256()
-    with open(file_path, "rb") as f:
-        while chunk := f.read(CHUNK_SIZE):
-            hasher.update(chunk)
-    return hasher.hexdigest()
-
-
-def find_exact_duplicates(target_folder: Path, recursive: bool = False) -> Dict[str, List[Path]]:
-    """Find exact binary duplicates using size filtering + SHA-256 hashing."""
-    target = Path(target_folder).resolve()
-    size_groups: Dict[int, List[Path]] = {}
-
-    def collect_files():
-        if recursive:
-            for root, dirs, files in os.walk(str(target)):
-                current = Path(root)
-                if any(part.startswith(".") for part in current.relative_to(target).parts):
-                    continue
-                if current.name == DUPLICATES_FOLDER_NAME:
-                    continue
-                for fname in files:
-                    fp = current / fname
-                    if not is_hidden_file(fp) and fp.name != DUPLICATES_FOLDER_NAME:
-                        yield fp
-        else:
-            for item in target.iterdir():
-                if item.is_file() and not is_hidden_file(item) and item.name != DUPLICATES_FOLDER_NAME:
-                    yield item
-
-    for file_path in collect_files():
-        try:
-            size = file_path.stat().st_size
-            if size > 0:
-                size_groups.setdefault(size, []).append(file_path)
-        except OSError:
-            pass
-
-    duplicate_groups: Dict[str, List[Path]] = {}
-    for size, file_list in size_groups.items():
-        if len(file_list) > 1:
-            hash_groups: Dict[str, List[Path]] = {}
-            for fp in file_list:
-                try:
-                    h = get_file_hash(fp)
-                    hash_groups.setdefault(h, []).append(fp)
-                except OSError:
-                    pass
-
-            for h, matches in hash_groups.items():
-                if len(matches) > 1:
-                    duplicate_groups[h] = matches
-
-    return duplicate_groups
-
-
-def find_converted_duplicates(target_folder: Path, recursive: bool = False) -> Dict[str, List[Path]]:
-    """
-    Find converted file duplicates where the base name (stem) is identical,
-    especially across image, video, audio, or document formats.
-    Example: banner.jpg, banner.webp, banner.png
-    """
-    target = Path(target_folder).resolve()
-    stem_groups: Dict[str, List[Path]] = {}
-
-    def collect_files():
-        if recursive:
-            for root, dirs, files in os.walk(str(target)):
-                current = Path(root)
-                if any(part.startswith(".") for part in current.relative_to(target).parts):
-                    continue
-                if current.name == DUPLICATES_FOLDER_NAME:
-                    continue
-                for fname in files:
-                    fp = current / fname
-                    if not is_hidden_file(fp) and fp.name != DUPLICATES_FOLDER_NAME:
-                        yield fp
-        else:
-            for item in target.iterdir():
-                if item.is_file() and not is_hidden_file(item) and item.name != DUPLICATES_FOLDER_NAME:
-                    yield item
-
-    for file_path in collect_files():
-        # Normalized lower stem (base name without extension)
-        stem = file_path.stem.lower().strip()
-        category = get_file_category(file_path)
-
-        # Key by stem and broad category so photo.jpg and photo.txt aren't marked as converted images
-        key = f"{category}::{stem}"
-        stem_groups.setdefault(key, []).append(file_path)
-
-    converted_groups: Dict[str, List[Path]] = {}
-    for key, file_list in stem_groups.items():
-        # Multiple files with different extensions under the same category
-        unique_extensions = {fp.suffix.lower() for fp in file_list}
-        if len(file_list) > 1 and len(unique_extensions) > 1:
-            # Sort so largest file is first (or smallest depending on retention, keep files sorted by size descending)
-            sorted_files = sorted(file_list, key=lambda f: f.stat().st_size if f.exists() else 0, reverse=True)
-            converted_groups[key] = sorted_files
-
-    return converted_groups
+def get_file_hash(file_path, cancel_event=None):
+    digest = hashlib.sha256()
+    with Path(file_path).open("rb") as stream:
+        while chunk := stream.read(CHUNK_SIZE):
+            check_cancel(cancel_event)
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def find_duplicates(
-    target_folder: Path,
-    method: DuplicateMethod = DuplicateMethod.EXACT,
-    recursive: bool = False,
-) -> Dict[str, List[Path]]:
-    """Master entry point for duplicate detection based on selected method."""
-    if method == DuplicateMethod.CONVERTED:
-        return find_converted_duplicates(target_folder, recursive=recursive)
-    elif method == DuplicateMethod.VISUAL:
-        # If pillow is available, perform perceptual visual hashing; otherwise fallback to converted
-        try:
-            from PIL import Image
-            # Fast perceptual difference hash (dHash) implementation
-            return _find_visual_duplicates_pillow(target_folder, recursive=recursive)
-        except ImportError:
-            print("Note: Pillow is not installed. Using converted format matching instead.")
-            return find_converted_duplicates(target_folder, recursive=recursive)
-    else:
-        return find_exact_duplicates(target_folder, recursive=recursive)
-
-
-def _find_visual_duplicates_pillow(target_folder: Path, recursive: bool = False) -> Dict[str, List[Path]]:
-    """Find visually similar images by computing 64-bit difference hash (dHash)."""
-    from PIL import Image
-
+    target_folder,
+    method=DuplicateMethod.EXACT,
+    recursive=False,
+    cancel_event=None,
+    progress=None,
+    cache=None,
+    signatures=None,
+    config=None,
+):
     target = Path(target_folder).resolve()
-    image_hashes: Dict[str, List[Path]] = {}
+    if not target.is_dir():
+        raise NotADirectoryError(f"Folder is unavailable: {target}")
+    # Match historical hidden/quarantine exclusions and skip generated logs.
+    config = config or ConfigManager()
+    files = list(iter_files(target, recursive, config, cancel_event))
+    groups, sizes = {}, {}
+    cache = {} if cache is None else cache
+    for path in files:
+        check_cancel(cancel_event)
+        sizes.setdefault(path.stat().st_size, []).append(path)
+    if method == DuplicateMethod.EXACT:
+        candidates = [
+            p
+            for size, paths in sizes.items()
+            if size > 0 and len(paths) > 1
+            for p in paths
+        ]
+    else:
+        candidates = files
+    for index, path in enumerate(candidates):
+        check_cancel(cancel_event)
+        before = fingerprint(path)
+        if method == DuplicateMethod.CONVERTED:
+            key = f"{get_file_category(path)}::{path.stem.lower().strip()}"
+        elif method == DuplicateMethod.VISUAL:
+            if get_file_category(path) != "Images":
+                continue
+            from PIL import Image, UnidentifiedImageError
 
-    def collect_images():
-        if recursive:
-            for root, dirs, files in os.walk(str(target)):
-                current = Path(root)
-                if any(part.startswith(".") for part in current.relative_to(target).parts):
-                    continue
-                if current.name == DUPLICATES_FOLDER_NAME:
-                    continue
-                for fname in files:
-                    fp = current / fname
-                    if not is_hidden_file(fp) and get_file_category(fp) == "Images":
-                        yield fp
-        else:
-            for item in target.iterdir():
-                if item.is_file() and not is_hidden_file(item) and get_file_category(item) == "Images":
-                    yield item
-
-    def dhash(image_path: Path, hash_size: int = 8) -> Optional[str]:
-        try:
-            with Image.open(image_path) as img:
-                img = img.convert("L").resize((hash_size + 1, hash_size), Image.Resampling.LANCZOS)
-                pixels = list(img.getdata())
-                diff = []
-                for row in range(hash_size):
-                    for col in range(hash_size):
-                        pixel_left = pixels[row * (hash_size + 1) + col]
-                        pixel_right = pixels[row * (hash_size + 1) + col + 1]
-                        diff.append("1" if pixel_left > pixel_right else "0")
-                return hex(int("".join(diff), 2))[2:].zfill(hash_size * hash_size // 4)
-        except Exception:
-            return None
-
-    for img_path in collect_images():
-        h = dhash(img_path)
-        if h:
-            image_hashes.setdefault(h, []).append(img_path)
-
-    return {h: files for h, files in image_hashes.items() if len(files) > 1}
-
-
-def calculate_duplicate_space(duplicate_groups: Dict[str, List[Path]]) -> int:
-    """Calculate total redundant bytes that can be freed by removing duplicate copies."""
-    wasted_bytes = 0
-    for key, files in duplicate_groups.items():
-        if len(files) > 1:
             try:
-                # Assuming keeping the first file, sum the sizes of the rest
-                for copy in files[1:]:
-                    wasted_bytes += copy.stat().st_size
-            except OSError:
-                pass
-    return wasted_bytes
+                with Image.open(path) as image:
+                    image = image.convert("L").resize((9, 8), Image.Resampling.LANCZOS)
+                    pixels = list(
+                        image.get_flattened_data()
+                        if hasattr(image, "get_flattened_data")
+                        else image.getdata()
+                    )
+                    bits = [
+                        (
+                            "1"
+                            if pixels[row * 9 + col] > pixels[row * 9 + col + 1]
+                            else "0"
+                        )
+                        for row in range(8)
+                        for col in range(8)
+                    ]
+                    key = hex(int("".join(bits), 2))
+            except (UnidentifiedImageError, OSError):
+                continue
+        else:
+            cache_key = (str(path), before, path.stat().st_ctime_ns)
+            key = cache.get(cache_key)
+            if key is None:
+                key = get_file_hash(path, cancel_event)
+                cache[cache_key] = key
+        if fingerprint(path) != before:
+            raise ValueError(f"File changed during scan; scan again: {path}")
+        if signatures is not None:
+            signatures[str(path)] = before
+        groups.setdefault(key, []).append(path)
+        if progress:
+            progress(index + 1, len(candidates), "Comparing files")
+    if len(cache) > 10000:
+        cache.clear()
+    results = {}
+    for key, paths in groups.items():
+        if len(paths) < 2:
+            continue
+        if method == DuplicateMethod.CONVERTED:
+            if len({p.suffix.lower() for p in paths}) < 2:
+                continue
+            paths.sort(key=lambda p: p.stat().st_size, reverse=True)
+        results[key] = paths
+    return results
+
+
+def find_exact_duplicates(target_folder, recursive=False):
+    return find_duplicates(target_folder, DuplicateMethod.EXACT, recursive)
+
+
+def find_converted_duplicates(target_folder, recursive=False):
+    return find_duplicates(target_folder, DuplicateMethod.CONVERTED, recursive)
+
+
+def _find_visual_duplicates_pillow(target_folder, recursive=False):
+    return find_duplicates(target_folder, DuplicateMethod.VISUAL, recursive)
+
+
+def calculate_duplicate_space(duplicate_groups):
+    return sum(
+        p.stat().st_size
+        for paths in duplicate_groups.values()
+        for p in paths[1:]
+        if p.exists()
+    )
 
 
 def move_duplicates(
-    target_folder: Path,
-    duplicate_groups: Dict[str, List[Path]],
-    undo_manager: Optional[UndoManager] = None,
-    dry_run: bool = False,
-) -> Tuple[int, List[Dict[str, str]]]:
-    """
-    Move redundant duplicate copies to target_folder/_duplicates/, keeping the first file in place.
-    Returns: (moved_count, recorded_moves)
-    """
+    target_folder,
+    duplicate_groups,
+    undo_manager=None,
+    dry_run=False,
+    cancel_event=None,
+    progress=None,
+    signatures=None,
+):
     target = Path(target_folder).resolve()
-    duplicates_dir = target / DUPLICATES_FOLDER_NAME
-
-    recorded_moves: List[Dict[str, str]] = []
-    moved_count = 0
-
-    for key, files in duplicate_groups.items():
-        redundant_copies = files[1:]
-
-        for copy in redundant_copies:
-            dest_file = duplicates_dir / copy.name
-
+    destination = validate_inside(target / DUPLICATES_FOLDER_NAME, target)
+    journal = MoveJournal(undo_manager or UndoManager(target))
+    moved, records, reserved = 0, [], set()
+    total = sum(max(0, len(paths) - 1) for paths in duplicate_groups.values())
+    # A reviewed group must still contain the same files before any action starts.
+    for paths in duplicate_groups.values():
+        for path in paths:
+            validate_inside(path, target)
+            if signatures is not None and fingerprint(path) != signatures[str(path)]:
+                raise ValueError(f"File changed since scan; scan again: {path}")
+    for paths in duplicate_groups.values():
+        for source in paths[1:]:
+            if cancel_event is not None and cancel_event.is_set():
+                return moved, records
+            if signatures is not None:
+                for member in (paths[0], source):
+                    if fingerprint(member) != signatures[str(member)]:
+                        raise ValueError(f"File changed since scan: {member}")
+            dest = destination / source.name
             counter = 1
-            stem = copy.stem
-            suffix = copy.suffix
-            while dest_file.exists():
-                dest_file = duplicates_dir / f"{stem}_dup{counter}{suffix}"
+            while dest.exists() or dest in reserved:
+                dest = destination / f"{source.stem}_dup{counter}{source.suffix}"
                 counter += 1
-
+            reserved.add(dest)
             if not dry_run:
-                duplicates_dir.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(copy), str(dest_file))
-                recorded_moves.append({
-                    "source": str(copy),
-                    "destination": str(dest_file),
-                })
-            moved_count += 1
-
-    if not dry_run and recorded_moves and undo_manager:
-        undo_manager.record_manifest(recorded_moves)
-
-    return moved_count, recorded_moves
+                destination.mkdir(exist_ok=True)
+                records.append(journal.move(source, dest))
+            moved += 1
+            if progress:
+                progress(
+                    moved,
+                    total,
+                    "Previewing copies" if dry_run else "Moving extra copies",
+                )
+    return moved, records

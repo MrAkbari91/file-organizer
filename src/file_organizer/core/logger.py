@@ -72,7 +72,7 @@ def setup_logger(
     if gui_callback:
         cb_handler = CallbackHandler(gui_callback)
         cb_handler.setLevel(logging.INFO)
-        cb_handler.setFormatter(logging.Formatter("[%(asctime)s] %(message)s", datefmt="%H:%M:%S"))
+        cb_handler.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s", datefmt="%H:%M:%S"))
         logger.addHandler(cb_handler)
 
     return logger

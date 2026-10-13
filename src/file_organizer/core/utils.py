@@ -69,29 +69,26 @@ def is_path_inside(child: Path, parent: Path) -> bool:
         return False
 
 
-def remove_empty_folders(root_dir: Path) -> int:
-    """
-    Recursively remove empty directories bottom-up under root_dir.
-    Does not remove root_dir itself or hidden history folders.
-    Returns count of removed directories.
-    """
-    removed_count = 0
-    # Walk bottom-up
-    for dirpath, dirnames, filenames in os.walk(str(root_dir), topdown=False):
-        current = Path(dirpath)
-        if current.resolve() == root_dir.resolve():
-            continue
+def remove_empty_folders(root_dir: Path, config=None) -> int:
+    from file_organizer.core.safety import is_link
 
-        # Skip hidden folders like .file_organizer_history
-        if current.name.startswith("."):
-            continue
-
+    root_dir = Path(root_dir).resolve()
+    candidates = []
+    for directory, dirs, _ in os.walk(root_dir, topdown=True, followlinks=False):
+        base = Path(directory)
+        dirs[:] = [
+            d
+            for d in dirs
+            if not is_link(base / d)
+            and not d.startswith(".")
+            and (config is None or not config.should_ignore(base / d))
+        ]
+        candidates.extend(base / d for d in dirs)
+    removed = 0
+    for directory in reversed(candidates):
         try:
-            # Check if directory is empty
-            if not any(current.iterdir()):
-                current.rmdir()
-                removed_count += 1
+            directory.rmdir()
+            removed += 1
         except OSError:
             pass
-
-    return removed_count
+    return removed

@@ -35,6 +35,7 @@ class ConfigManager:
         self.ignore_patterns: List[str] = list(DEFAULT_IGNORE_PATTERNS)
         self.default_mode: str = "category"
         self.sub_extension: bool = True
+        self.theme: str = "dark"
         self.load()
 
     def load(self) -> None:
@@ -67,6 +68,9 @@ class ConfigManager:
 
             if "sub_extension" in data:
                 self.sub_extension = bool(data["sub_extension"])
+
+            if "theme" in data and data["theme"] in ("dark", "light"):
+                self.theme = data["theme"]
 
         except Exception as e:
             print(f"Warning: Failed to parse configuration file '{target}': {e}")

@@ -1,41 +1,209 @@
-# file-organizer
+# File Organizer Pro
 
-A small Python script that tidies up a folder by moving each file into a subfolder named after its extension.
+A Python CLI and desktop workspace for organizing files, reviewing duplicates and watching folders. Python 3.10+ with Tk for the GUI. Native build targets: Windows x64, Linux x64, macOS Intel and Apple Silicon. Local verification is on Windows 11; the GitHub workflow tests and builds each target on its own OS.
 
-```
-Downloads/                 Downloads/
-├── report.pdf             ├── pdf/
-├── photo.JPG       →      │   └── report.pdf
-└── notes.txt              ├── jpg/
-                           │   └── photo.JPG
-                           └── txt/
-                               └── notes.txt
-```
+## Run from source
 
-## Requirements
+From the repository folder in PowerShell:
 
-Python 3.6+ (standard library only, no dependencies).
-
-## Usage
-
-Organize a specific folder:
-
-```bash
-python organize_files.py path/to/folder
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python -m pip install -r requirements-build.txt
+.\.venv\Scripts\python -m pip install -e ".[dev]"
+.\.venv\Scripts\python -m file_organizer --gui
 ```
 
-Or copy `organize_files.py` into the folder you want to organize and run it with no arguments:
+After installation, `file-organizer-gui` also launches the desktop app. The existing CLI remains available:
 
-```bash
-python organize_files.py
+```powershell
+.\.venv\Scripts\python -m file_organizer "C:\path\to\test-folder" --by-category --dry-run
 ```
 
-## Behavior
+On macOS/Linux, use `python3 -m venv .venv`, then `.venv/bin/python` in place of `.\.venv\Scripts\python`. Debian/Ubuntu source installs need `python3-venv` and `python3-tk`; other Python distributions must include Tcl/Tk. A graphical desktop is required for the GUI. On a server, use `python -m file_organizer --cli --help` or the standalone CLI. A GUI startup failure exits with an error and never silently starts organizing the current folder.
 
-- Extensions are lowercased, so `photo.JPG` and `photo.jpg` both go into `jpg/`.
-- Files without an extension (and hidden files like `.gitignore`) are left in place.
-- Subfolders are not touched; only files directly inside the folder are moved.
-- If a file with the same name already exists in the destination, it is skipped, never overwritten.
-- The script never moves itself.
+Do not use the repository itself as an organization target. Use a generated test folder first.
 
-> **Note:** Running it with no arguments inside this repository will sort the repository's own files (e.g. `README.md` → `md/`). Pass a folder path instead.
+## Desktop workflow
+
+1. Open **Organize Studio** and select a target folder. Browse and presets only select a folder.
+2. Choose **By category**, **By extension** or **By timeline**. Configure sub-extension grouping, recursion and optional empty-folder cleanup.
+3. Choose **Scan & preview**. Review the source, destination and status table; double-click a row for full paths.
+4. Turn off **Dry run** to enable **Organize reviewed files**, then confirm the reviewed operation.
+5. Follow actual file counts and progress. **Cancel** stops at a safe file boundary; completed moves retain undo records.
+6. Open **Activity & History** to inspect the selected folder's latest manifest and undo a file operation.
+
+Changing the folder, strategy or rules invalidates the preview. Files are revalidated before each move. Preview never moves or deletes files and does not write logs into the selected folder.
+
+**Duplicate Hunter** supports exact SHA-256 content, same-name formats and image dHash comparison. Exact matching uses size filtering and a metadata-validated in-memory hash cache. Scan results show groups, retained files, extra paths, sizes and modification times. Select extras with Ctrl/Shift or **Select extra copies**, then preview or confirm moving only those copies into `_duplicates/`. No duplicate files are deleted. Moving copies does not free disk space; the dashboard reports potential duplicate size, not fabricated savings. Name and visual matches may contain different information and should be reviewed.
+
+**Automation & Settings** starts/stops the current watcher with the selected strategy and rules. It locks those settings until monitoring stops. Closing the app requests cancellation, waits for current work to finish safely and closes logs. Windows sign-in automation is a separate, explicitly enabled silent watcher. Disabling its startup entry prevents future launches; it does not terminate a watcher already running from a previous sign-in. Sign out to stop that process, or close it through Windows Task Manager.
+
+## Appearance and controls
+
+- CustomTkinter 5.2.2 provides rounded cards, buttons, inputs, themed dialogs and Windows DPI handling.
+- Five pages: Dashboard, Organize Studio, Duplicate Hunter, Automation & Settings, Activity & History.
+- The requested navy/cyan dark and light palettes are centralized in `src/file_organizer/gui/theme.py`.
+- `set_appearance_mode()` controls CustomTkinter colors. Only data tables use ttk, styled from the same tokens.
+- Theme switching updates the existing widgets and native Windows caption in place. It does not hide, remap or rebuild the window. Reviewed files, selected rows and the active page remain intact. The small caption adapter in `gui/windows.py` is regression-tested against the pinned CustomTkinter version.
+- Segoe UI is preferred, with an Arial/system fallback. Monospaced activity text includes timestamps and severity.
+- Original outline icons are bundled as PNGs and a multi-resolution Windows ICO; generated by `scripts/generate_icons.py`. No remote assets are needed at runtime.
+- Theme, last folder, rules, auto-scroll and the last 50 job summaries persist separately from `config.json`.
+- Smaller windows scroll the page while action buttons, activity and cancellation remain reachable. Minimum window size is 1080 × 720 logical pixels.
+- Shortcuts: **Ctrl+O** browse, **Ctrl+L** focus path, **Ctrl+Enter** preview in Organize Studio, **Escape** cancel a running job.
+
+Preferences and GUI activity logs use `%LOCALAPPDATA%\FileOrganizer` on Windows, or `$XDG_CONFIG_HOME/FileOrganizer` / `~/.config/FileOrganizer` elsewhere. Existing `config.json` category mappings and ignore patterns remain supported. Old `appearance.json` theme-only files are migrated by retaining their theme.
+
+## File safety
+
+- Existing destination names are never overwritten. Conflicts in the same preview are marked before execution.
+- Directory links, junctions and file reparse points are excluded. Destination paths must remain inside the selected root.
+- A changed source is rejected after preview; changed duplicate scan results require another scan.
+- Each real move gets a flushed write-ahead journal intent in `.file_organizer_history`. Legacy JSON manifests are still read.
+- Undo validates both paths, refuses occupied originals and checks recorded file metadata. Failed or cancelled undo entries remain available for retry.
+- Empty directories are removed only when that option is enabled. Hidden/ignored/link subtrees are excluded. Deleted empty directories themselves are not restored by file undo.
+- Cancellation is cooperative. Hashing checks between chunks; moves/undo finish the current file before stopping.
+- On macOS/Linux, exclusive hard-link/unlink moves preserve the file identity used by undo. Moves across filesystem boundaries, or on filesystems without hard-link support, fail safely and keep the source file. Windows uses no-replace rename with the same cross-volume limitation.
+- Directory enumeration reports inaccessible paths; file operation failures are logged and shown in results.
+
+Like any filesystem application, concurrent edits from another application can race an operation. This tool does not provide a filesystem-wide lock or a power-loss transaction guarantee. It preserves source files on failed moves and records recoverable move intents.
+
+## Build locally: Windows, macOS or Linux
+
+Windows: double-click `build.bat`, or run it from PowerShell:
+
+```powershell
+.\build.bat
+# Optional: .\build.bat --gui  or  .\build.bat --cli
+```
+
+macOS/Linux:
+
+```sh
+sh build.sh
+# Optional: sh build.sh --gui  or  sh build.sh --cli
+```
+
+Both launchers locate the project independently of the current folder, create `.venv-build`, install `requirements-build.txt` and the local project, build CLI and GUI, run generated-file checks on the actual executables, and archive complete bundles into `dist/releases/`. Python 3.10+ and internet access for the first dependency installation are required. On Windows, `FILE_ORGANIZER_PYTHON` can select a specific Python executable; `FILE_ORGANIZER_NO_PAUSE=1` disables the closing prompt. Close previously built apps before rebuilding their files. An unsuccessful install, build or executable check returns a nonzero exit code.
+
+If dependencies are already installed, the direct build command is:
+
+```powershell
+.\.venv\Scripts\python scripts\build.py --verify --archive
+```
+
+The GUI uses `packaging/file-organizer-premium.spec`. Native outputs are:
+
+| Host | GUI | CLI | Release format |
+| --- | --- | --- | --- |
+| Windows | `dist/premium/File Organizer Pro/File Organizer Pro.exe` | `dist/premium/file-organizer-cli/file-organizer-cli.exe` | `.zip` |
+| macOS | `dist/premium/File Organizer Pro.app` | `dist/premium/file-organizer-cli/file-organizer-cli` | `.tar.gz` |
+| Linux | `dist/premium/File Organizer Pro/File Organizer Pro` | `dist/premium/file-organizer-cli/file-organizer-cli` | `.tar.gz` |
+
+The familiar Windows GUI path remains:
+
+```text
+dist/premium/File Organizer Pro/File Organizer Pro.exe
+```
+
+Keep the entire `File Organizer Pro` folder together, including `_internal`. The build bundles Tk, CustomTkinter assets, Pillow, application icons and the headless startup entry point. Output is separate from the original `dist/file-organizer-gui.exe`; original generated root `.spec` files are left intact. The original source snapshot is under `build/backups/before-premium-*`.
+
+Share the ZIP/tar.gz archives, not a bare executable. POSIX archives preserve executable permissions and the symlinks required by PyInstaller. Extract macOS archives to obtain the `.app`; extract Linux archives and run the executable inside its folder. macOS builds are not Developer ID signed/notarized and Windows builds are not Authenticode signed. Signing requires the owner's certificates and is not configured. Linux artifacts are built on Ubuntu 22.04 and require a compatible glibc/desktop environment; older distributions should build from source.
+
+PyInstaller builds for its current host OS; it does not cross-compile all three targets from Windows. See [PyInstaller's platform guidance](https://pyinstaller.org/en/stable/operating-mode.html).
+
+To build the preserved CLI separately:
+
+```powershell
+.\.venv\Scripts\python scripts\build.py --cli
+```
+
+## Automatic GitHub builds
+
+`.github/workflows/release.yml` runs on **every branch push**, pull request, or manual **Run workflow**. All new source, assets, scripts and the tracked `packaging/` spec must be included in the commit.
+
+1. Windows x64, Linux x64, macOS Intel and macOS Apple Silicon run on separate native runners using Python 3.12.
+2. Each runner compiles the code, runs the full test suite, builds both apps and verifies the built executables against generated files. Linux GUI checks use Xvfb.
+3. Successful jobs upload `binaries-windows-x64`, `binaries-linux-x64`, `binaries-macos-x64` and `binaries-macos-arm64` under **Actions → workflow run → Artifacts**. Artifacts expire after 14 days; diagnostics are uploaded even if a job fails.
+4. Extra Linux jobs test Python 3.10 and 3.14 compatibility.
+5. A pushed `v*` version tag publishes a GitHub Release only after all platform and compatibility jobs pass. Ordinary branch pushes create downloadable Actions artifacts, not public Releases.
+
+The macOS runner labels explicitly distinguish Intel and ARM; archives are labeled from the actual build architecture. See [GitHub's supported runners](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job). Repository Actions must be enabled. No GitHub push or remote workflow run was performed as part of the local implementation.
+
+## Validate
+
+```powershell
+.\.venv\Scripts\python -m compileall -q src scripts tests
+.\.venv\Scripts\python -m pytest -q
+.\.venv\Scripts\python -m file_organizer.gui.app --smoke-test build/source-smoke.json
+& ".\dist\premium\File Organizer Pro\File Organizer Pro.exe" --smoke-test build/executable-smoke.json
+```
+
+The explicit smoke-test mode creates its own temporary dataset alongside the requested report, checks GUI workflows, writes a JSON result and closes. It never runs on ordinary startup and never uses your existing personal folders. Review the report's `passed` field rather than assuming a windowed process exit means success.
+
+Tests cover organization strategies, recursion, dry run, preview invalidation, filename conflicts, stale files, duplicate scanning/selection/cache, visual comparison, undo conflicts, cancellation, watcher lifecycle, startup command generation, both themes, persistence, navigation and small-window layout. Windows symlink creation tests may skip where Developer Mode/admin privileges are unavailable. Startup-registration tests replace the real Startup folder with a temporary directory.
+
+### Verified redesign results — 13 October 2026
+
+Validated on Windows 11 with Python 3.14.5, CustomTkinter 5.2.2, Pillow 12.3.0 and PyInstaller 6.22.3.
+
+| Check | Actual result |
+| --- | --- |
+| Syntax compilation (`src`, `scripts`, `tests`, `packaging`) | Passed |
+| Full test suite after portability fixes | **69 passed, 1 skipped** in 67.43 seconds |
+| Actual `build.bat` from a different working directory | Fresh isolated dependencies, CLI + GUI build/verification/archives; exit code 0 |
+| Source workflow smoke test | All 7 workflow groups passed |
+| Separate Windows onedir build | Completed successfully |
+| Packaged executable workflow smoke test | All 7 workflow groups passed; process shut down |
+| Packaged CLI | Help/version, read-only dry run, organize/undo and duplicates/undo passed |
+| Smooth theme regression | Four switches preserve the mapped window, geometry, reviewed plan, selected row and page; zero unmap events |
+| Shell launcher and workflow | Shell syntax passed; YAML parsed and push/PR/manual triggers, platform matrix and release gating checked locally |
+| Normal executable launch | Opened the File Organizer Pro window successfully |
+| Visual inspection | Dark and Light dashboard; Organize Studio and Duplicate Hunter |
+| Minimum 1080 × 720 layout | All five pages checked in both themes by GUI tests |
+
+Latest local results: `build/portable-tests.xml`, `build/bat-build.log`, `build/gui-final-build.log`, `build/verification/cli-smoke.json`, `build/verification/gui-smoke.json`. Earlier redesign screenshots are under `build/previews/`. These generated artifacts are excluded from Git. The executable test uses only generated files and writes success after the window closes and the temporary dataset is cleaned up.
+
+The one skipped test needs Windows permission to create real symlinks. A separate test verifies link/hidden-subtree pruning without that privilege. The POSIX move implementation is also exercised locally with actual NTFS hard links, including journal-based undo; this does not replace native macOS/Linux testing. Access-denied and locked-move behavior is covered through injected failures; no ACLs on personal folders were changed. Windows sign-in registration is tested using temporary paths, but an actual sign-out/sign-in cycle and a second clean Windows machine have not been tested. macOS/Linux native builds and Python 3.10/3.12 compatibility await the first GitHub run. Responsiveness and cancellation are tested with a deliberately slow worker, not a large-directory performance benchmark.
+
+The sandbox's system temporary directory denied file access during one validation attempt. The final successful run put all test data inside the project:
+
+```powershell
+$testRoot = Join-Path (Get-Location) 'build\validation-final'
+New-Item -ItemType Directory -Force -Path $testRoot | Out-Null
+$env:TEMP = $testRoot
+$env:TMP = $testRoot
+.\.venv\Scripts\python -m pytest -q --basetemp build/validation-final/pytest --junitxml=build/test-results.xml
+```
+
+The windowed bundle routes dependency startup diagnostics to `%LOCALAPPDATA%\FileOrganizer\bootstrap.log` when a console stream is unavailable.
+
+## Source organization
+
+| Area | Files |
+| --- | --- |
+| UI coordination and stable native window theme | `gui/app.py`, `gui/windows.py` |
+| Pages and reusable controls | `gui/views.py`, `gui/components.py` |
+| Design system and assets | `gui/theme.py`, `gui/assets/`, `scripts/generate_icons.py` |
+| Background jobs and preferences | `gui/jobs.py`, `gui/preferences.py` |
+| Packaged startup and smoke checks | `gui/startup.py`, `gui/smoke.py` |
+| Sorting and operation plans | `core/organizer.py`, `core/safety.py` |
+| Duplicate comparison and quarantine | `core/duplicates.py` |
+| Journals and undo | `core/undo.py` |
+| Watcher and Windows registration | `core/watcher.py`, `core/autostart.py` |
+| Existing configuration, category maps, logging | `core/config.py`, `core/categories.py`, `core/logger.py` |
+| Packaging | `build.bat`, `build.sh`, `scripts/bootstrap_build.py`, `scripts/build.py`, `scripts/verify_build.py`, `packaging/file-organizer-premium.spec`, `packaging/runtime_streams.py`, `requirements*.txt`, `pyproject.toml` |
+| CI and checkout line endings | `.github/workflows/release.yml`, `.gitattributes` |
+| Updated/new verification | `tests/test_gui.py`, `tests/test_safety.py`, `tests/test_watcher.py`, `tests/test_cli.py`, `tests/test_entrypoints.py`, `tests/test_build.py` |
+| Project documentation and generated-output exclusions | `README.md`, `.gitignore` |
+
+All `gui/` and `core/` paths above are relative to `src/file_organizer/`.
+
+## Legacy standalone script
+
+`organize_files.py` remains available for the original extension-only workflow:
+
+```powershell
+python organize_files.py "C:\path\to\folder"
+```
+
+It lowercases extensions, skips existing destination names, leaves extensionless/hidden files in place and does not process subfolders.
