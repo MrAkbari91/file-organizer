@@ -1,7 +1,8 @@
 """Native windows that recolor their caption without hiding or recreating them.
 
 CustomTkinter 5.2.2 hides Windows windows in its title-bar color hook. This small
-adapter replaces that hook only; widget themes still use set_appearance_mode().
+adapter also leaves focus stacking to the OS; widget themes still use
+set_appearance_mode().
 Keep the regression test when upgrading the pinned toolkit version.
 """
 
@@ -11,6 +12,12 @@ import customtkinter as ctk
 
 
 class StableCaption:
+    def _focus_in_event(self, event):
+        # CTk 5.2.2 lifts every window on macOS FocusIn, including events from
+        # descendants. Let the native window manager control stacking instead:
+        # lifting during focus dispatch can continuously enqueue focus events.
+        pass
+
     def _windows_set_titlebar_color(self, color_mode):
         if sys.platform != "win32":
             return

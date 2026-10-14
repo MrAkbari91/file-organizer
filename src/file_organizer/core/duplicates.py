@@ -1,4 +1,4 @@
-"""Cancellable duplicate scans with size filtering and stat-validated hash caching."""
+"""Cancellable duplicate scans with size filtering and fresh content verification."""
 
 import hashlib
 from enum import Enum
@@ -49,7 +49,12 @@ def find_duplicates(
     config = config or ConfigManager()
     files = list(iter_files(target, recursive, config, cancel_event))
     groups, sizes = {}, {}
-    cache = {} if cache is None else cache
+    # Keep the cache argument compatible with GUI callers, but never trust hashes
+    # from a previous scan. Same-size writes can share mtime/ctime on fast or
+    # coarse-clock filesystems (and Windows ctime can mean creation time).
+    # Size filtering above hashing still avoids reading unique-size files.
+    if cache is not None:
+        cache.clear()
     for path in files:
         check_cancel(cancel_event)
         sizes.setdefault(path.stat().st_size, []).append(path)
@@ -93,11 +98,7 @@ def find_duplicates(
             except (UnidentifiedImageError, OSError):
                 continue
         else:
-            cache_key = (str(path), before, path.stat().st_ctime_ns)
-            key = cache.get(cache_key)
-            if key is None:
-                key = get_file_hash(path, cancel_event)
-                cache[cache_key] = key
+            key = get_file_hash(path, cancel_event)
         if fingerprint(path) != before:
             raise ValueError(f"File changed during scan; scan again: {path}")
         if signatures is not None:
@@ -105,8 +106,6 @@ def find_duplicates(
         groups.setdefault(key, []).append(path)
         if progress:
             progress(index + 1, len(candidates), "Comparing files")
-    if len(cache) > 10000:
-        cache.clear()
     results = {}
     for key, paths in groups.items():
         if len(paths) < 2:

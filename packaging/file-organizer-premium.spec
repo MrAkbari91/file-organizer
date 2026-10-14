@@ -9,7 +9,8 @@ a = Analysis(
     binaries=[],
     datas=collect_data_files('customtkinter') + copy_metadata('customtkinter') + [
         (str(root / 'src/file_organizer/gui/assets'), 'file_organizer/gui/assets')],
-    hiddenimports=['PIL.Image', 'PIL.ImageTk', 'file_organizer.gui.startup'],
+    # Pillow's C extension imports the Tk finder dynamically on Unix.
+    hiddenimports=['PIL.Image', 'PIL.ImageTk', 'PIL._tkinter_finder', 'file_organizer.gui.startup'],
     hookspath=[], hooksconfig={}, runtime_hooks=[str(root / 'packaging/runtime_streams.py')], excludes=['numpy', 'pytest', 'matplotlib'], noarchive=False,
 )
 pyz = PYZ(a.pure)

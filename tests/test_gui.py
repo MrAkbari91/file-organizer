@@ -266,3 +266,13 @@ def test_theme_switch_preserves_visible_window_and_review(gui_app, tmp_path):
         assert tree.selection() == (row,)
         assert gui_app.active_tab == "organize"
     assert unmapped == []
+
+
+def test_focus_events_do_not_restack_windows(gui_app, monkeypatch):
+    from types import SimpleNamespace
+
+    raised = []
+    monkeypatch.setattr(gui_app.root, "lift", lambda: raised.append(True))
+    for widget in (gui_app.root, gui_app.folder_entry):
+        gui_app.root._focus_in_event(SimpleNamespace(widget=widget))
+    assert raised == []

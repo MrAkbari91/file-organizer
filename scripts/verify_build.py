@@ -24,15 +24,19 @@ def verify(kind, executable):
         if kind == "gui":
             report = reports / "gui-smoke.json"
             report.unlink(missing_ok=True)
-            subprocess.run(
+            process = subprocess.run(
                 [str(executable), "--smoke-test", str(report)],
                 cwd=sandbox,
                 env=env,
-                check=True,
+                check=False,
                 timeout=90,
             )
+            if not report.is_file():
+                raise RuntimeError(
+                    f"GUI smoke test exited {process.returncode} without a report"
+                )
             result = json.loads(report.read_text(encoding="utf-8"))
-            if result.get("passed") is not True:
+            if process.returncode != 0 or result.get("passed") is not True:
                 raise RuntimeError(f"GUI smoke test failed: {result}")
         else:
             folder = sandbox / "files"

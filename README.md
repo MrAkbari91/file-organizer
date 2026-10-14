@@ -34,7 +34,7 @@ Do not use the repository itself as an organization target. Use a generated test
 
 Changing the folder, strategy or rules invalidates the preview. Files are revalidated before each move. Preview never moves or deletes files and does not write logs into the selected folder.
 
-**Duplicate Hunter** supports exact SHA-256 content, same-name formats and image dHash comparison. Exact matching uses size filtering and a metadata-validated in-memory hash cache. Scan results show groups, retained files, extra paths, sizes and modification times. Select extras with Ctrl/Shift or **Select extra copies**, then preview or confirm moving only those copies into `_duplicates/`. No duplicate files are deleted. Moving copies does not free disk space; the dashboard reports potential duplicate size, not fabricated savings. Name and visual matches may contain different information and should be reviewed.
+**Duplicate Hunter** supports exact SHA-256 content, same-name formats and image dHash comparison. Exact matching filters candidates by size, then reads their current content on every scan. Hashes are not reused across scans because same-size edits can share filesystem timestamps. Scan results show groups, retained files, extra paths, sizes and modification times. Select extras with Ctrl/Shift or **Select extra copies**, then preview or confirm moving only those copies into `_duplicates/`. No duplicate files are deleted. Moving copies does not free disk space; the dashboard reports potential duplicate size, not fabricated savings. Name and visual matches may contain different information and should be reviewed.
 
 **Automation & Settings** starts/stops the current watcher with the selected strategy and rules. It locks those settings until monitoring stops. Closing the app requests cancellation, waits for current work to finish safely and closes logs. Windows sign-in automation is a separate, explicitly enabled silent watcher. Disabling its startup entry prevents future launches; it does not terminate a watcher already running from a previous sign-in. Sign out to stop that process, or close it through Windows Task Manager.
 
@@ -127,7 +127,22 @@ To build the preserved CLI separately:
 4. Extra Linux jobs test Python 3.10 and 3.14 compatibility.
 5. A pushed `v*` version tag publishes a GitHub Release only after all platform and compatibility jobs pass. Ordinary branch pushes create downloadable Actions artifacts, not public Releases.
 
-The macOS runner labels explicitly distinguish Intel and ARM; archives are labeled from the actual build architecture. See [GitHub's supported runners](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job). Repository Actions must be enabled. No GitHub push or remote workflow run was performed as part of the local implementation.
+The macOS runner labels explicitly distinguish Intel and ARM; archives are labeled from the actual build architecture. See [GitHub's supported runners](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job). Repository Actions must be enabled.
+
+### Recovering a failed version tag
+
+A failed build prevents the Release job from running. Check the failing platform job and its diagnostics artifact first; retrying the Release job alone cannot repair a broken executable.
+
+The original `v1.0.0` run failed before publishing: Windows/Python 3.14 exposed stale duplicate hashes, a Windows test compared short and expanded directory names, Linux's frozen GUI was missing `PIL._tkinter_finder`, and macOS GUI tests timed out. Release fixes add the missing dynamic import, fresh content hashing, canonical test paths, native focus stacking, and a 120-second per-test watchdog with stack traces. Packaged GUI failures now include their JSON error details in the job log.
+
+Push the fixes and wait for every branch build to pass. Then create a **new, unused** version tag on that fixed commit, for example:
+
+```sh
+git tag v1.0.1
+git push origin v1.0.1
+```
+
+The tag must point to the commit containing the fixes. Re-running the old `v1.0.0` run still checks out its old, broken commit. A green branch run produces Actions artifacts; the new tag run builds and publishes the public Release after all checks pass.
 
 ## Validate
 
@@ -140,7 +155,13 @@ The macOS runner labels explicitly distinguish Intel and ARM; archives are label
 
 The explicit smoke-test mode creates its own temporary dataset alongside the requested report, checks GUI workflows, writes a JSON result and closes. It never runs on ordinary startup and never uses your existing personal folders. Review the report's `passed` field rather than assuming a windowed process exit means success.
 
-Tests cover organization strategies, recursion, dry run, preview invalidation, filename conflicts, stale files, duplicate scanning/selection/cache, visual comparison, undo conflicts, cancellation, watcher lifecycle, startup command generation, both themes, persistence, navigation and small-window layout. Windows symlink creation tests may skip where Developer Mode/admin privileges are unavailable. Startup-registration tests replace the real Startup folder with a temporary directory.
+Tests cover organization strategies, recursion, dry run, preview invalidation, filename conflicts, stale files, duplicate scanning/selection and same-timestamp edits, visual comparison, undo conflicts, cancellation, watcher lifecycle, startup command generation, both themes, persistence, navigation and small-window layout. Windows symlink creation tests may skip where Developer Mode/admin privileges are unavailable. Startup-registration tests replace the real Startup folder with a temporary directory.
+
+### Release repair validation — 14 October 2026
+
+Windows validation after the release fixes: **71 tests passed, 1 skipped** (symlink privileges), CLI and GUI bundles built successfully, both executable smoke reports passed, and both Windows ZIP archives were created. The visible-window theme regression also passed. Reports are in `build/release-test-results.xml`, `build/release-tests.log`, `build/release-build.log`, and `build/verification/`.
+
+The missing Linux Pillow import is included in the spec. The macOS focus adjustment is a candidate fix for the GUI timeout and still needs native CI confirmation. No new remote run has validated these fixes yet; do not treat Windows results as proof of Linux/macOS success. Push the fixed source, inspect all native jobs, and only tag that commit after they pass.
 
 ### Verified redesign results — 13 October 2026
 

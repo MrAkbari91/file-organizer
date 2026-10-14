@@ -60,3 +60,26 @@ def test_archive_contains_executable_and_runtime(tmp_path, monkeypatch, kind):
             assert archive.getmember(
                 (runtime.parent / "library-link").relative_to(build.DIST_DIR).as_posix()
             ).issym()
+
+
+def test_gui_verification_reports_failure_details(tmp_path, monkeypatch):
+    import json
+
+    spec = importlib.util.spec_from_file_location(
+        "verify_script", Path(__file__).parents[1] / "scripts/verify_build.py"
+    )
+    verifier = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(verifier)
+    monkeypatch.setattr(verifier, "ROOT", tmp_path)
+
+    def failed(command, **kwargs):
+        Path(command[-1]).write_text(
+            json.dumps(
+                {"passed": False, "error": "No module named PIL._tkinter_finder"}
+            )
+        )
+        return subprocess.CompletedProcess(command, 1)
+
+    monkeypatch.setattr(verifier.subprocess, "run", failed)
+    with pytest.raises(RuntimeError, match="PIL._tkinter_finder"):
+        verifier.verify("gui", tmp_path / "app")

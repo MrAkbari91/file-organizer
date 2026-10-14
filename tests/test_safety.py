@@ -124,12 +124,24 @@ def test_hidden_tree_and_links_are_not_followed(temp_dir, tmp_path):
     assert (hidden / "secret.txt").exists() and (outside / "external.txt").exists()
 
 
-def test_duplicate_scan_cache_invalidation(temp_dir, monkeypatch):
+def test_duplicate_scan_rechecks_content_with_unchanged_metadata(temp_dir, monkeypatch):
     a = temp_dir / "a.txt"
     b = temp_dir / "b.txt"
     a.write_text("same")
     b.write_text("same")
     import file_organizer.core.duplicates as module
+
+    # Deterministically emulate filesystems whose timestamps do not distinguish
+    # two same-size writes. No sleeps or reliance on the runner's clock speed.
+    original_stat = Path.stat
+    snapshots = {a: a.stat(), b: b.stat()}
+
+    def unchanged_stat(path, *args, **kwargs):
+        if path in snapshots:
+            return snapshots[path]
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", unchanged_stat)
 
     original = module.get_file_hash
     calls = []
@@ -142,10 +154,10 @@ def test_duplicate_scan_cache_invalidation(temp_dir, monkeypatch):
     cache = {}
     assert find_duplicates(temp_dir, cache=cache)
     assert find_duplicates(temp_dir, cache=cache)
-    assert len(calls) == 2
+    assert len(calls) == 4
     b.write_text("else")
     assert not find_duplicates(temp_dir, cache=cache)
-    assert len(calls) == 3
+    assert len(calls) == 6
 
 
 def test_duplicate_snapshot_and_quarantine_pruning(temp_dir):
@@ -240,7 +252,9 @@ def test_excluded_subtrees_are_pruned_without_link_privileges(temp_dir, monkeypa
     (linked / "remote.txt").write_text("linked contents")
     original = safety.is_link
     monkeypatch.setattr(
-        safety, "is_link", lambda path: Path(path) == linked or original(path)
+        safety,
+        "is_link",
+        lambda path: Path(path).resolve() == linked.resolve() or original(path),
     )
     result = FileOrganizer(temp_dir, recursive=True, clean_empty=True).organize()
     assert result["moved"] == 0
