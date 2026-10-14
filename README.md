@@ -161,7 +161,9 @@ Tests cover organization strategies, recursion, dry run, preview invalidation, f
 
 Windows validation after the release fixes: **71 tests passed, 1 skipped** (symlink privileges), CLI and GUI bundles built successfully, both executable smoke reports passed, and both Windows ZIP archives were created. The visible-window theme regression also passed. Reports are in `build/release-test-results.xml`, `build/release-tests.log`, `build/release-build.log`, and `build/verification/`.
 
-The missing Linux Pillow import is included in the spec. The macOS focus adjustment is a candidate fix for the GUI timeout and still needs native CI confirmation. No new remote run has validated these fixes yet; do not treat Windows results as proof of Linux/macOS success. Push the fixed source, inspect all native jobs, and only tag that commit after they pass.
+[GitHub run 38518427531](https://github.com/MrAkbari91/file-organizer/actions/runs/38518427531) verified the Windows and Linux builds and Python 3.10/3.14 compatibility. Both macOS jobs still timed out inside `root.update()` in the light-theme layout test, so the earlier focus adjustment did not resolve that failure.
+
+The follow-up replaces GUI test event draining with timer-bounded `mainloop()` intervals and maps the layout window before processing native events. The packaged smoke check also starts directly through `mainloop()` after mapping its window. All GUI assertions and the per-test watchdog remain enabled. Local follow-up validation: **71 passed, 1 skipped** in 26.46 seconds (`build/macos-event-loop-tests.xml`). Native macOS confirmation requires a new push and CI run; only tag the fixed commit after every platform passes.
 
 ### Verified redesign results — 13 October 2026
 

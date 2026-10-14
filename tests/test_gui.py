@@ -11,6 +11,22 @@ from file_organizer.gui.views import PAGES
 from file_organizer.gui.windows import MainWindow, AppToplevel
 
 
+def pump_events(window, milliseconds=30):
+    """Run Tk's native event loop for a bounded interval.
+
+    Tcl's update command drains the event queue before returning. On macOS,
+    window initialization can keep that queue active indefinitely. A scheduled
+    quit returns control to the test without requiring an empty event queue.
+    Use the interpreter root so closing a child cannot delete the quit timer.
+    """
+    root = window._root()
+    timer = root.after(milliseconds, root.quit)
+    try:
+        root.mainloop()
+    finally:
+        root.after_cancel(timer)
+
+
 @pytest.fixture(scope="module")
 def gui_root():
     root = MainWindow()
@@ -29,7 +45,7 @@ def gui_app(tmp_path, gui_root, monkeypatch):
     app._close()
     deadline = time.monotonic() + 5
     while not app._closed and time.monotonic() < deadline:
-        gui_root.update()
+        pump_events(gui_root)
         time.sleep(0.01)
     assert app._closed
 
@@ -37,10 +53,10 @@ def gui_app(tmp_path, gui_root, monkeypatch):
 def wait(app):
     deadline = time.monotonic() + 8
     while (app._busy or app._render_timers) and time.monotonic() < deadline:
-        app.root.update()
+        pump_events(app.root)
         time.sleep(0.01)
     assert not app._busy
-    app.root.update()
+    pump_events(app.root)
 
 
 def dataset(app, tmp_path):
@@ -92,19 +108,16 @@ def test_preference_restored(gui_root, tmp_path):
 def test_minimum_size_actions_visible(gui_app, theme):
     if gui_app.current_theme != theme:
         gui_app.toggle_theme()
-    # Let initial layout and DPI sizing settle before mapping the test window.
-    until = time.monotonic() + 0.1
-    while time.monotonic() < until:
-        gui_app.root.update()
-        time.sleep(0.01)
-    gui_app.root.geometry("1080x720")
+    # Map before processing native window events, as on ordinary startup.
     gui_app.root.deiconify()
+    pump_events(gui_app.root, 100)
+    gui_app.root.geometry("1080x720")
     for page in PAGES:
         gui_app._set_tab(page)
         # Give each page's scrollable layout time to settle.
         deadline = time.monotonic() + 1
         while time.monotonic() < deadline:
-            gui_app.root.update()
+            pump_events(gui_app.root)
             if gui_app.root.winfo_ismapped() and time.monotonic() > deadline - 0.8:
                 break
             time.sleep(0.01)
@@ -213,7 +226,7 @@ def test_watcher_start_stop(gui_app, tmp_path):
     gui_app._toggle_watch()
     deadline = time.monotonic() + 4
     while not (folder / "txt" / "notes.txt").exists() and time.monotonic() < deadline:
-        gui_app.root.update()
+        pump_events(gui_app.root)
         time.sleep(0.02)
     assert gui_app.active_watcher.is_running()
     assert gui_app.folder_entry.cget("state") == "disabled"
@@ -221,7 +234,7 @@ def test_watcher_start_stop(gui_app, tmp_path):
     assert "Watching" in gui_app.watcher_badge.cget("text")
     gui_app._toggle_watch()
     while gui_app._watch_stopping and time.monotonic() < deadline:
-        gui_app.root.update()
+        pump_events(gui_app.root)
         time.sleep(0.02)
     assert gui_app.active_watcher is None
     assert (folder / "txt" / "notes.txt").exists()
@@ -246,7 +259,7 @@ def test_theme_switch_preserves_visible_window_and_review(gui_app, tmp_path):
     wait(gui_app)
     root = gui_app.root
     root.deiconify()
-    root.update()
+    pump_events(root, 100)
     tree = gui_app.plan_table.tree
     row = tree.get_children()[0]
     tree.selection_set(row)
@@ -259,7 +272,7 @@ def test_theme_switch_preserves_visible_window_and_review(gui_app, tmp_path):
     )
     for _ in range(4):
         gui_app.toggle_theme()
-        root.update()
+        pump_events(root, 100)
         assert root.winfo_id() == identity and root.winfo_ismapped()
         assert root.geometry() == geometry
         assert gui_app._plan is plan

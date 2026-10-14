@@ -111,9 +111,10 @@ def run_smoke(report_path):
         except Exception as error:
             fail(error)
 
-    # Finish initialization before scheduling workflows that can close the app.
-    root.update()
+    # Use the same native event loop as normal startup. Calling update() here
+    # can stall on macOS before the smoke-test deadline callback is installed.
     root.report_callback_exception = lambda kind, error, trace: fail(error)
+    root.deiconify()
     root.after(100, tick)
     root.mainloop()
     scratch.cleanup()
